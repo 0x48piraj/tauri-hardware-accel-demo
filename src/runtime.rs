@@ -13,8 +13,10 @@ use crate::app::DemoApp;
 pub struct Runtime;
 
 impl Runtime {
-    // Launches the CEF runtime and blocks until shutdown
-    pub fn run() {
+    /// Launches the CEF runtime and blocks until shutdown.
+    ///
+    /// start_url determines what the browser loads on startup.
+    pub fn run(start_url: CefString) {
         #[cfg(target_os = "macos")]
         crate::platform::macos::init_ns_app();
 
@@ -28,7 +30,7 @@ impl Runtime {
         let is_browser_process = cmd.has_switch(Some(&switch)) != 1;
 
         let window = Arc::new(Mutex::new(None));
-        let mut app = DemoApp::new(window.clone());
+        let mut app = DemoApp::new(window.clone(), start_url);
 
         let ret = execute_process(
             Some(args.as_main_args()),

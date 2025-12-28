@@ -12,7 +12,6 @@ mod app;
 mod browser;
 mod window;
 mod client;
-mod frontend;
 
 #[cfg(target_os = "macos")]
 mod platform;
