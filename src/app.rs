@@ -20,11 +20,13 @@ wrap_app! {
             command_line: Option<&mut CommandLine>,
         ) {
             if let Some(cmd) = command_line {
-                // Force software rendering to avoid GPU process crashes while developing
-                cmd.append_switch(Some(&CefString::from("disable-gpu")));
-                cmd.append_switch(Some(&CefString::from("disable-gpu-compositing")));
-                // Optional: If you see GPU driver-specific issues, enable this too:
-                // cmd.append_switch(Some(&CefString::from("disable-software-rasterizer")));
+                // Enable GPU-backed rendering paths.
+                // These flags allow Chromium to use hardware acceleration for WebGL,
+                // rasterization, and video decode where supported. GPU availability
+                // depends on platform and process architecture (see documentation).
+                cmd.append_switch(Some(&CefString::from("enable-gpu")));
+                cmd.append_switch(Some(&CefString::from("enable-webgl")));
+                cmd.append_switch(Some(&CefString::from("ignore-gpu-blocklist")));
             }
         }
 
