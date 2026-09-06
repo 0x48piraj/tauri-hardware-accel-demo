@@ -521,11 +521,28 @@ pub fn sign_app_bundle(
         }
     };
 
-    // Nested code first. The framework carries no entitlements of its own
-    let framework = app_dir
-        .join("Contents")
-        .join("Frameworks")
-        .join(MACOS_FRAMEWORK);
+    let frameworks = app_dir.join("Contents").join("Frameworks");
+
+    // Innermost first
+    if frameworks.is_dir() {
+        let mut helpers: Vec<PathBuf> = fs::read_dir(&frameworks)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "app"))
+            .collect();
+
+        // read_dir order is unspecified; sign in a stable order
+        helpers.sort();
+
+        for helper in helpers {
+            let mut args = codesign_sign_args(config, entitlements);
+            args.push(OsString::from(&helper));
+            run(args, "codesign (helper)")?;
+        }
+    }
+
+    // Sign the framework after its nested helpers
+    let framework = frameworks.join(MACOS_FRAMEWORK);
 
     if framework.exists() {
         let mut args = codesign_sign_args(config, None);

@@ -483,7 +483,7 @@ impl App {
         let ResolvedFrontend {
             asset_root,
             start_url,
-        } = resolver::resolve(&source)?;
+        } = resolver::resolve_for_process(&source)?;
 
         let spec = RuntimeSpec {
             mode: RuntimeMode::Views,
@@ -533,7 +533,7 @@ impl App {
         let ResolvedFrontend {
             asset_root,
             start_url,
-        } = resolver::resolve(&source)?;
+        } = resolver::resolve_for_process(&source)?;
 
         let spec = RuntimeSpec {
             mode: RuntimeMode::Embedded,

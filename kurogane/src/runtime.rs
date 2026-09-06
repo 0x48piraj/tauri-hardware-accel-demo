@@ -80,6 +80,7 @@ fn build_settings(
     // Use a persistent profile instead of CEF's default incognito mode
     // This enables cookies, storage APIs and service workers
 
+    #[cfg(not(target_os = "macos"))]
     let exe_str = layout.exe.to_string_lossy();
     #[cfg(not(target_os = "macos"))]
     let cef_root_str = layout.cef_root.to_string_lossy();
@@ -104,9 +105,19 @@ fn build_settings(
 
     #[cfg(target_os = "macos")]
     {
+        // Fall back to the main executable for unbundled
+        let subprocess = kurogane_layout::bundled_helper_path()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| layout.exe.clone());
+
+        debug!("Browser subprocess path: {}", subprocess.display());
+
+        let subprocess_str = subprocess.to_string_lossy();
+
         // CEF resolves resources, locales and V8 snapshots from the framework bundle
         let mut s = Settings {
-            browser_subprocess_path: CefString::from(exe_str.as_ref()),
+            browser_subprocess_path: CefString::from(subprocess_str.as_ref()),
             external_message_pump: external_message_pump as i32,
             cache_path: CefString::from(layout.cache_dir.to_string_lossy().as_ref()),
             root_cache_path: CefString::from(layout.cache_dir.to_string_lossy().as_ref()),
@@ -122,6 +133,22 @@ fn build_settings(
 
         s
     }
+}
+
+/// Returns whether this process is the browser process.
+pub(crate) fn is_browser_process() -> bool {
+    browser_process_from_args(std::env::args_os())
+}
+
+/// Returns whether the arguments identify a subprocess.
+fn browser_process_from_args<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    !args
+        .into_iter()
+        .any(|arg| arg.as_ref().to_string_lossy().starts_with("--type="))
 }
 
 fn execute_subprocesses(args: &Args, app: &mut App) {
@@ -1168,5 +1195,41 @@ impl RuntimeBootstrap {
             }),
         };
         Ok(AppInstance { handle })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_launched_process_is_the_browser_process() {
+        assert!(browser_process_from_args([
+            "/Apps/MyApp.app/Contents/MacOS/myapp"
+        ]));
+    }
+
+    #[test]
+    fn a_typed_process_is_a_subprocess() {
+        for role in [
+            "--type=renderer",
+            "--type=gpu-process",
+            "--type=utility",
+            "--type=zygote",
+        ] {
+            assert!(
+                !browser_process_from_args(["/path/to/helper", role, "--no-sandbox"]),
+                "{role} is a subprocess"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrelated_flag_does_not_make_it_a_subprocess() {
+        assert!(browser_process_from_args([
+            "/path/to/myapp",
+            "--typewriter",
+            "--type-check"
+        ]));
     }
 }

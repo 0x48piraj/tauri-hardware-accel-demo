@@ -42,9 +42,9 @@ pub fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Returns the `Contents` directory for a macOS app bundle.
+/// Returns the `Contents` directory of the `.app` directly containing `exe`.
 #[cfg(any(target_os = "macos", test))]
-fn app_bundle_contents(exe: &Path) -> Option<PathBuf> {
+fn owning_bundle_contents(exe: &Path) -> Option<PathBuf> {
     let macos = exe.parent()?;
     let contents = macos.parent()?;
     let app = contents.parent()?;
@@ -57,6 +57,32 @@ fn app_bundle_contents(exe: &Path) -> Option<PathBuf> {
     }
 
     Some(contents.to_path_buf())
+}
+
+/// Returns the enclosing application's `Contents` directory.
+#[cfg(any(target_os = "macos", test))]
+fn enclosing_application_contents(helper_contents: &Path) -> Option<PathBuf> {
+    let frameworks = helper_contents.parent()?.parent()?;
+    let contents = frameworks.parent()?;
+
+    if frameworks.file_name()? != "Frameworks"
+        || contents.file_name()? != "Contents"
+        || contents.parent()?.extension()? != "app"
+    {
+        return None;
+    }
+
+    Some(contents.to_path_buf())
+}
+
+/// Returns the `Contents` directory for the application bundle.
+///
+/// Helper bundles resolve to their enclosing application bundle.
+#[cfg(any(target_os = "macos", test))]
+fn app_bundle_contents(exe: &Path) -> Option<PathBuf> {
+    let contents = owning_bundle_contents(exe)?;
+
+    Some(enclosing_application_contents(&contents).unwrap_or(contents))
 }
 
 /// Returns the bundled resource directory, if running from a bundle.
@@ -93,6 +119,35 @@ fn bundled_resource_root_for(exe: &Path) -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Returns the bundled macOS helper executable, if present.
+pub fn bundled_helper_path() -> Result<Option<PathBuf>, std::io::Error> {
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(bundled_helper_path_for(&std::env::current_exe()?));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    Ok(None)
+}
+
+/// Returns the bundled helper executable for the application containing `exe`.
+#[cfg(any(target_os = "macos", test))]
+fn bundled_helper_path_for(exe: &Path) -> Option<PathBuf> {
+    let contents = app_bundle_contents(exe)?;
+    let name = contents.parent()?.file_stem()?.to_str()?;
+
+    let helper = format!("{name} Helper");
+
+    let path = contents
+        .join("Frameworks")
+        .join(format!("{helper}.app"))
+        .join("Contents")
+        .join("MacOS")
+        .join(&helper);
+
+    path.is_file().then_some(path)
 }
 
 pub fn bundled_cef_root() -> Result<Option<PathBuf>, std::io::Error> {
@@ -143,6 +198,28 @@ pub fn bundled_cef_root() -> Result<Option<PathBuf>, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_helper_resolves_to_the_application_that_owns_it() {
+        assert_eq!(
+            app_bundle_contents(Path::new(
+                "/Apps/MyApp.app/Contents/Frameworks/MyApp Helper.app/Contents/MacOS/MyApp Helper"
+            )),
+            Some(PathBuf::from("/Apps/MyApp.app/Contents"))
+        );
+    }
+
+    #[test]
+    fn a_bundle_outside_frameworks_resolves_to_itself() {
+        assert_eq!(
+            app_bundle_contents(Path::new(
+                "/Apps/Outer.app/Contents/Resources/Inner.app/Contents/MacOS/inner"
+            )),
+            Some(PathBuf::from(
+                "/Apps/Outer.app/Contents/Resources/Inner.app/Contents"
+            ))
+        );
+    }
 
     #[test]
     fn app_bundle_contents_found_for_a_bundled_executable() {
@@ -226,6 +303,36 @@ mod tests {
         assert_eq!(
             bundled_resource_root_for(Path::new("/Apps/MyApp.app/Contents/MacOS/myapp")),
             Some(PathBuf::from("/Apps/MyApp.app/Contents/Resources"))
+        );
+    }
+
+    #[test]
+    fn a_bundle_without_helpers_has_no_helper_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let macos = dir.path().join("MyApp.app").join("Contents").join("MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+
+        assert_eq!(bundled_helper_path_for(&macos.join("myapp")), None);
+    }
+
+    #[test]
+    fn the_helper_is_named_after_the_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let contents = dir.path().join("MyApp.app").join("Contents");
+        let helper_exe = contents
+            .join("Frameworks")
+            .join("MyApp Helper.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("MyApp Helper");
+
+        std::fs::create_dir_all(helper_exe.parent().unwrap()).unwrap();
+        std::fs::write(&helper_exe, b"mach-o").unwrap();
+        std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+
+        assert_eq!(
+            bundled_helper_path_for(&contents.join("MacOS").join("myapp")),
+            Some(helper_exe)
         );
     }
 

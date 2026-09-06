@@ -42,14 +42,16 @@ fn plist_escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// The bundle identifier for an application, configured or derived.
+fn bundle_identifier(meta: &AppMetadata) -> String {
+    meta.identifier
+        .clone()
+        .unwrap_or_else(|| default_identifier(&meta.name))
+}
+
 /// Generates `Contents/Info.plist` for the bundle.
 fn write_info_plist(app_dir: &Path, meta: &AppMetadata, exe_name: &str, icon: bool) -> Result<()> {
-    let bundle_identifier = plist_escape(
-        &meta
-            .identifier
-            .clone()
-            .unwrap_or_else(|| default_identifier(&meta.name)),
-    );
+    let bundle_identifier = plist_escape(&bundle_identifier(meta));
 
     let name = plist_escape(&meta.name);
     let exe = plist_escape(exe_name);
@@ -102,14 +104,12 @@ fn write_info_plist(app_dir: &Path, meta: &AppMetadata, exe_name: &str, icon: bo
     Ok(())
 }
 
-/// Fallback bundle identifier for projects that do not set `[app].identifier`.
+/// Returns a fallback bundle identifier for projects without `[app].identifier`.
 ///
 /// Usable for local builds; Developer ID distribution needs an identifier
 /// under the signing team's own domain, hence the config key.
 ///
-/// `CFBundleIdentifier` is specified as ASCII alphanumerics, `-` and `.`, so
-/// anything else in the name becomes a hyphen. A non-ASCII identifier fails
-/// notarization and confuses keychain and LaunchServices identity matching.
+/// Non-ASCII and non-alphanumeric characters in the name are replaced with `-`.
 fn default_identifier(name: &str) -> String {
     let slug: String = name
         .to_lowercase()
@@ -118,6 +118,89 @@ fn default_identifier(name: &str) -> String {
         .collect();
 
     format!("com.kurogane.{slug}")
+}
+
+/// macOS helper bundles required by CEF.
+const HELPERS: &[(&str, &str)] = &[
+    ("", "helper"),
+    (" (GPU)", "helper.gpu"),
+    (" (Plugin)", "helper.plugin"),
+    (" (Renderer)", "helper.renderer"),
+    (" (Alerts)", "helper.alerts"),
+];
+
+/// Writes `Contents/Info.plist` for a helper bundle.
+fn write_helper_plist(
+    helper_app: &Path,
+    name: &str,
+    identifier: &str,
+    version: &str,
+) -> Result<()> {
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>{name}</string>
+    <key>CFBundleDisplayName</key>
+    <string>{name}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{identifier}</string>
+    <key>CFBundleExecutable</key>
+    <string>{name}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>{version}</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+"#,
+        name = plist_escape(name),
+        identifier = plist_escape(identifier),
+        version = plist_escape(version),
+    );
+
+    fs::write(helper_app.join("Contents").join("Info.plist"), plist)?;
+
+    Ok(())
+}
+
+/// Installs the helper bundles into `Contents/Frameworks/`.
+fn install_helpers(
+    frameworks: &Path,
+    executable: &Path,
+    app_name: &str,
+    identifier: &str,
+    version: &str,
+) -> Result<()> {
+    for (suffix, id_suffix) in HELPERS {
+        let helper_name = format!("{app_name} Helper{suffix}");
+        let helper_app = frameworks.join(format!("{helper_name}.app"));
+        let macos = helper_app.join("Contents").join("MacOS");
+
+        fs::create_dir_all(&macos)?;
+
+        let helper_exe = macos.join(&helper_name);
+
+        fs::copy(executable, &helper_exe)?;
+        fs::set_permissions(&helper_exe, fs::Permissions::from_mode(0o755))?;
+
+        write_helper_plist(
+            &helper_app,
+            &helper_name,
+            &format!("{identifier}.{id_suffix}"),
+            version,
+        )?;
+    }
+
+    Ok(())
 }
 
 /// Installs the configured icon as `AppIcon.icns`.
@@ -219,6 +302,16 @@ pub fn build(
 
     // Validate the placed framework
     validate_cef_runtime(&frameworks_dir(&app_dir))?;
+
+    // Subprocess helpers, beside the framework. Without these macOS launches no
+    // renderer and the packaged app shows a blank window.
+    install_helpers(
+        &frameworks_dir(&app_dir),
+        &exe_dest,
+        &app_name,
+        &bundle_identifier(&dist.metadata),
+        &dist.metadata.version,
+    )?;
 
     // Icon, before the plist so it can reference it only when present
     let icon = match &dist.metadata.icon {
@@ -353,6 +446,46 @@ mod tests {
                 .exists()
         );
         assert!(app_dir.join("Contents").join("Info.plist").exists());
+    }
+
+    #[test]
+    fn helpers_are_installed_beside_the_framework() {
+        let dir = tempfile::tempdir().unwrap();
+        let cef = dir.path().join("cef");
+        framework_fixture(&cef);
+        let exe = dir.path().join("target").join("release").join("myapp");
+        write_executable(&exe);
+
+        let dist = ResolvedDistribution {
+            metadata: sample_metadata(),
+            executable: exe,
+            frontend: None,
+            cef_runtime: cef,
+            extra_resources: Vec::new(),
+        };
+
+        let output = dir.path().join("dist");
+        let app_dir = build(&dist, &output, None).unwrap();
+        let frameworks = app_dir.join("Contents").join("Frameworks");
+
+        for (suffix, id_suffix) in HELPERS {
+            let name = format!("MyApp Helper{suffix}");
+            let helper = frameworks.join(format!("{name}.app"));
+
+            assert!(
+                helper.join("Contents").join("MacOS").join(&name).is_file(),
+                "{name} must carry the application binary"
+            );
+
+            let plist = fs::read_to_string(helper.join("Contents").join("Info.plist")).unwrap();
+
+            // Keep helpers out of the Dock
+            assert!(plist.contains("<key>LSUIElement</key>"), "{name}: {plist}");
+            assert!(
+                plist.contains(&format!("<string>com.kurogane.myapp.{id_suffix}</string>")),
+                "{name} needs its own identifier: {plist}"
+            );
+        }
     }
 
     #[test]

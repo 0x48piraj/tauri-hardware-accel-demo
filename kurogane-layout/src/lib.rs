@@ -24,8 +24,8 @@ pub use config::{
 };
 pub use distribution::{AppMetadata, DistributionError, ResolvedDistribution, ResolvedResource};
 pub use layout::{
-    bundled_cef_root, bundled_resource_root, cef_install_dir, copy_dir, install_root,
-    installed_cef_root,
+    bundled_cef_root, bundled_helper_path, bundled_resource_root, cef_install_dir, copy_dir,
+    install_root, installed_cef_root,
 };
 pub use package::{PackageError, package_directory};
 pub use profile::{cache_root, profile_dir, PROFILE_HASH_HEX_DIGITS};

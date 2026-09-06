@@ -34,6 +34,18 @@ fn resolve_asset_root(dir: &Path) -> PathBuf {
     dir.to_path_buf()
 }
 
+/// Resolve the frontend for the browser process.
+pub(crate) fn resolve_for_process(source: &Source) -> Result<ResolvedFrontend, RuntimeError> {
+    if !crate::runtime::is_browser_process() {
+        return Ok(ResolvedFrontend {
+            asset_root: None,
+            start_url: String::new(),
+        });
+    }
+
+    resolve(source)
+}
+
 /// Resolve the frontend entrypoint.
 ///
 /// Priority:
