@@ -57,6 +57,7 @@ fn build_frontend(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageFormat {
     /// Plain directory bundle (default except on macOS).
+    #[cfg(not(target_os = "macos"))]
     Directory,
     /// Linux AppImage.
     #[cfg(target_os = "linux")]
@@ -99,7 +100,8 @@ impl PackageFormat {
             "dir" | "directory" => Ok(PackageFormat::Directory),
             #[cfg(target_os = "macos")]
             "dir" | "directory" => bail!(
-                "directory format is not supported on macOS; use `--format app` or `--format dmg`"
+                "directory format is not supported on macOS; \
+                 use '--format app', which produces a .app bundle and a .dmg"
             ),
             #[cfg(target_os = "linux")]
             "appimage" => Ok(PackageFormat::AppImage),
@@ -406,9 +408,11 @@ mod tests {
         for alias in ["dir", "directory"] {
             let err = PackageFormat::from_str(alias).unwrap_err().to_string();
 
-            assert!(err.contains("not a macOS output"), "got: {err}");
+            assert!(err.contains("not supported on macOS"), "got: {err}");
             assert!(err.contains("--format app"), "got: {err}");
         }
+
+        assert!(PackageFormat::from_str("app").is_ok());
     }
 
     #[test]
