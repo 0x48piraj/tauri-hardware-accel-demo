@@ -150,7 +150,6 @@ impl BundleLayout {
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-cd "$ROOT"
 
 {extra_ld_block}exec "$ROOT/{runtime_target}" "$@"
 "#
@@ -390,8 +389,9 @@ mod tests {
             "launcher should reference runtime/myapp"
         );
         assert!(
-            content.contains("cd \"$ROOT\""),
-            "launcher should anchor execution at the bundle root"
+            !content.contains("cd \"$ROOT\""),
+            "the launcher must not change the working directory: a bundle \
+             resolves its resources from the executable, not the CWD"
         );
         assert!(
             !content.contains("runtime/cef"),

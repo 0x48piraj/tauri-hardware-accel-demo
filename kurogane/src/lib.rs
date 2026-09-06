@@ -14,6 +14,7 @@ mod client;
 mod scheme;
 mod error;
 mod fs;
+mod resources;
 mod chromium_flags;
 mod sandbox;
 mod gpu;
@@ -24,7 +25,6 @@ pub mod bridge;
 pub mod logger;
 mod browser_info_map;
 
-#[cfg(target_os = "macos")]
 mod platform;
 
 pub use runtime::{AppInstance, AppHandle, BrowserBounds, BrowserHandle, WindowOptions, WindowState};
@@ -34,6 +34,7 @@ pub use gpu::GpuMode;
 pub use credentials::CredentialStorage;
 pub use error::RuntimeError;
 pub use app::App;
+pub use resources::resource_dir;
 pub use shutdown::ShutdownSignal;
 
 // Re-export IPC types for public use

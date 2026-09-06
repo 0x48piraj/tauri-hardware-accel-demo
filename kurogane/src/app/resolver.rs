@@ -4,6 +4,7 @@ use super::Source;
 
 use url::Url;
 use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use crate::error::RuntimeError;
 use crate::fs::CanonicalRoot;
 
@@ -15,6 +16,23 @@ pub struct ResolvedFrontend {
 }
 
 const APP_URL: &str = "app://app/index.html";
+
+/// Resolves a relative asset root against the enclosing application bundle.
+///
+/// Relative paths use the bundled resource root when the bundle contains 'em.
+fn resolve_asset_root(dir: &Path) -> PathBuf {
+    if dir.is_relative()
+        && let Ok(Some(root)) = kurogane_layout::bundled_resource_root()
+    {
+        let bundled = root.join(dir);
+
+        if bundled.is_dir() {
+            return bundled;
+        }
+    }
+
+    dir.to_path_buf()
+}
 
 /// Resolve the frontend entrypoint.
 ///
@@ -35,6 +53,8 @@ pub(crate) fn resolve(source: &Source) -> Result<ResolvedFrontend, RuntimeError>
         }
 
         Source::Path(dir) => {
+            let dir = &resolve_asset_root(dir);
+
             let root = match CanonicalRoot::new(dir) {
                 Ok(root) => root,
 
@@ -95,6 +115,23 @@ mod tests {
         let result = resolve(&source).unwrap();
 
         assert_eq!(result.start_url, url);
+    }
+
+    // Bundle resolution tests
+
+    #[test]
+    fn absolute_asset_roots_are_never_rebased() {
+        let dir = tmp();
+
+        assert_eq!(resolve_asset_root(dir.path()), dir.path());
+    }
+
+    #[test]
+    fn relative_asset_roots_pass_through_outside_a_bundle() {
+        assert_eq!(
+            resolve_asset_root(Path::new("content")),
+            Path::new("content")
+        );
     }
 
     // Path resolution tests
