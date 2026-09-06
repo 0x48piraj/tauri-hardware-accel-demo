@@ -13,6 +13,7 @@ pub struct AppMetadata {
     pub name: String,
     pub version: String,
     pub exe_name: String,
+    pub identifier: Option<String>,
     pub publisher: Option<String>,
     pub description: Option<String>,
     pub copyright: Option<String>,

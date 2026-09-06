@@ -7,10 +7,13 @@ use std::process::Command;
 use thiserror::Error;
 
 use crate::SigningFileConfig;
+#[cfg(target_os = "macos")]
+use crate::platform::MACOS_FRAMEWORK;
 
 /// Source of the signing certificate.
 ///
-/// Represents either a certificate file or a Windows certificate-store thumbprint.
+/// Represents either a certificate file, a Windows certificate-store thumbprint,
+/// or a macOS codesign identity string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CertificateSource {
     /// A certificate file with an optional password environment variable.
@@ -21,6 +24,9 @@ pub enum CertificateSource {
 
     /// A SHA-1 thumbprint identifying a certificate in the Windows store.
     Thumbprint(String),
+
+    /// A macOS codesign identity.
+    Identity(String),
 }
 
 /// Code signing configuration.
@@ -69,14 +75,23 @@ impl SignConfig {
     ///
     /// Returns `Ok(None)` when nothing is configured.
     pub fn from_file_config(file: &SigningFileConfig) -> Result<Option<SignConfig>, SigningError> {
-        let certificate = match (&file.certificate, &file.certificate_thumbprint) {
-            (Some(_), Some(_)) => return Err(SigningError::AmbiguousCertificate),
-            (Some(path), None) => Some(CertificateSource::File {
+        let certificate = match (
+            &file.certificate,
+            &file.certificate_thumbprint,
+            &file.certificate_identity,
+        ) {
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+                return Err(SigningError::AmbiguousCertificate);
+            }
+            (Some(path), None, None) => Some(CertificateSource::File {
                 path: path.clone(),
                 password_env: file.certificate_password_env.clone(),
             }),
-            (None, Some(thumbprint)) => Some(CertificateSource::Thumbprint(thumbprint.clone())),
-            (None, None) => None,
+            (None, Some(thumbprint), None) => {
+                Some(CertificateSource::Thumbprint(thumbprint.clone()))
+            }
+            (None, None, Some(identity)) => Some(CertificateSource::Identity(identity.clone())),
+            (None, None, None) => None,
         };
 
         let mut config = SignConfig {
@@ -102,6 +117,10 @@ impl SignConfig {
 }
 
 /// Resolves the certificate password from its configured environment variable.
+///
+/// Returns `Ok(None)` when no password is needed; this includes
+/// [`CertificateSource::Identity`] (keychain-managed) and
+/// [`CertificateSource::Thumbprint`] (Windows store).
 fn resolve_password(
     certificate: Option<&CertificateSource>,
 ) -> Result<Option<String>, SigningError> {
@@ -124,8 +143,15 @@ pub enum SigningError {
     NoSigningTool,
 
     #[error(
-        "[signing] sets both `certificate` and `certificate-thumbprint`; \
-         choose one (a certificate file or a Windows certificate store thumbprint)"
+        "no macOS codesign identity configured; set `certificate-identity` in [signing] \
+         (e.g. \"Developer ID Application: Name (TEAMID)\")"
+    )]
+    NoSigningIdentity,
+
+    #[error(
+        "[signing] sets more than one of `certificate`, `certificate-thumbprint` and \
+         `certificate-identity`; choose one (a certificate file, a Windows certificate \
+         store thumbprint, or a macOS codesign identity)"
     )]
     AmbiguousCertificate,
 
@@ -180,6 +206,8 @@ pub fn signtool_sign_args(config: &SignConfig, password: Option<&str>) -> Vec<Os
             args.push(OsString::from("/sha1"));
             args.push(OsString::from(thumbprint));
         }
+        // signtool has no macOS codesign identity; nothing to emit
+        Some(CertificateSource::Identity(_)) => {}
         None => {}
     }
 
@@ -390,6 +418,129 @@ fn find_osslsigncode() -> Option<PathBuf> {
     None
 }
 
+#[cfg(target_os = "macos")]
+fn find_codesign() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("KUROGANE_CODESIGN_PATH") {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    if let Ok(output) = Command::new("which").arg("codesign").output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Some(PathBuf::from(path));
+    }
+
+    None
+}
+
+/// The ad-hoc signing identity, which produces a signature bound to no
+/// certificate. Useful locally; never valid for distribution.
+#[cfg(any(target_os = "macos", test))]
+pub const AD_HOC_IDENTITY: &str = "-";
+
+/// Returns whether the configured identity is ad-hoc.
+#[cfg(any(target_os = "macos", test))]
+pub fn is_ad_hoc(config: &SignConfig) -> bool {
+    matches!(
+        &config.certificate,
+        Some(CertificateSource::Identity(id)) if id == AD_HOC_IDENTITY
+    )
+}
+
+/// Builds `codesign --sign` arguments for a single target (binary or bundle).
+///
+/// Never includes `--deep`: Apple deprecated it for signing because it applies
+/// one set of options to every nested item. [`sign_app_bundle`] signs
+/// inside-out instead.
+#[cfg(target_os = "macos")]
+pub fn codesign_sign_args(config: &SignConfig, entitlements: Option<&Path>) -> Vec<OsString> {
+    let mut args = vec![OsString::from("--sign")];
+
+    if let Some(CertificateSource::Identity(identity)) = &config.certificate {
+        args.push(OsString::from(identity));
+    }
+
+    if is_ad_hoc(config) {
+        args.push(OsString::from("--timestamp=none"));
+    } else {
+        args.push(OsString::from("--timestamp"));
+        args.push(OsString::from("--options"));
+        args.push(OsString::from("runtime"));
+    }
+
+    args.push(OsString::from("--force"));
+
+    if let Some(entitlements) = entitlements {
+        args.push(OsString::from("--entitlements"));
+        args.push(OsString::from(entitlements));
+    }
+
+    args
+}
+
+/// Builds `codesign --verify` arguments for a signed target.
+#[cfg(target_os = "macos")]
+pub fn codesign_verify_args(path: &Path) -> Vec<OsString> {
+    vec![
+        OsString::from("--verify"),
+        OsString::from("--deep"),
+        OsString::from("--strict"),
+        OsString::from(path),
+    ]
+}
+
+/// Signs a `.app` bundle inside-out.
+#[cfg(target_os = "macos")]
+pub fn sign_app_bundle(
+    app_dir: &Path,
+    config: &SignConfig,
+    entitlements: Option<&Path>,
+) -> Result<(), SigningError> {
+    let Some(codesign) = find_codesign() else {
+        return Err(SigningError::NoSigningTool);
+    };
+
+    if !matches!(&config.certificate, Some(CertificateSource::Identity(_))) {
+        return Err(SigningError::NoSigningIdentity);
+    }
+
+    let run = |args: Vec<OsString>, tool: &str| -> Result<(), SigningError> {
+        let status = Command::new(&codesign).args(&args).status()?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(SigningError::ToolFailed {
+                tool: tool.to_string(),
+                status,
+            })
+        }
+    };
+
+    // Nested code first. The framework carries no entitlements of its own
+    let framework = app_dir
+        .join("Contents")
+        .join("Frameworks")
+        .join(MACOS_FRAMEWORK);
+
+    if framework.exists() {
+        let mut args = codesign_sign_args(config, None);
+        args.push(OsString::from(&framework));
+        run(args, "codesign (framework)")?;
+    }
+
+    // Then the app itself, which is what the entitlements apply to
+    let mut args = codesign_sign_args(config, entitlements);
+    args.push(OsString::from(app_dir));
+    run(args, "codesign")?;
+
+    run(codesign_verify_args(app_dir), "codesign verify")
+}
+
 /// Signs a file using the configured signing strategy.
 pub fn sign_file(path: &Path, config: &SignConfig) -> Result<(), SigningError> {
     if !config.is_configured() {
@@ -403,6 +554,15 @@ pub fn sign_file(path: &Path, config: &SignConfig) -> Result<(), SigningError> {
     #[cfg(target_os = "windows")]
     if let Some(signtool) = find_signtool(config.tool.as_deref()) {
         return sign_with_signtool(path, &signtool, config);
+    }
+
+    #[cfg(target_os = "macos")]
+    if matches!(&config.certificate, Some(CertificateSource::Identity(_))) {
+        let Some(codesign) = find_codesign() else {
+            return Err(SigningError::NoSigningTool);
+        };
+
+        return sign_with_codesign(path, &codesign, config);
     }
 
     if let Some(osslsigncode) = find_osslsigncode() {
@@ -428,6 +588,32 @@ fn sign_with_signtool(
     if !status.success() {
         return Err(SigningError::ToolFailed {
             tool: "signtool".to_string(),
+            status,
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn sign_with_codesign(
+    path: &Path,
+    codesign: &Path,
+    config: &SignConfig,
+) -> Result<(), SigningError> {
+    // codesign requires an identity after --sign
+    if !matches!(&config.certificate, Some(CertificateSource::Identity(_))) {
+        return Err(SigningError::NoSigningIdentity);
+    }
+
+    let mut args = codesign_sign_args(config, None);
+    args.push(OsString::from(path));
+
+    let status = Command::new(codesign).args(&args).status()?;
+
+    if !status.success() {
+        return Err(SigningError::ToolFailed {
+            tool: "codesign".to_string(),
             status,
         });
     }
@@ -474,7 +660,9 @@ fn sign_with_osslsigncode(
     }
 }
 
-/// Determines whether a bundle entry is a signable PE artifact.
+/// Returns whether a bundle entry is a signable PE artifact.
+///
+/// macOS `.app` bundles are signed as a whole.
 pub fn should_sign(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext == "exe" || ext == "dll")
@@ -555,6 +743,21 @@ pub fn verify_signature(path: &Path, config: &SignConfig) -> Result<(), SigningE
         } else {
             Err(SigningError::ToolFailed {
                 tool: "signtool verify".to_string(),
+                status,
+            })
+        };
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Some(codesign) = find_codesign() {
+        let status = Command::new(codesign)
+            .args(codesign_verify_args(path))
+            .status()?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(SigningError::ToolFailed {
+                tool: "codesign verify".to_string(),
                 status,
             })
         };
@@ -998,5 +1201,184 @@ mod tests {
         };
         let count = sign_tree(dir.path(), &config).unwrap();
         assert_eq!(count, 2, "only app.exe and runtime/lib.dll are signed");
+    }
+
+    fn identify() -> CertificateSource {
+        CertificateSource::Identity("Developer ID Application: Acme (TEAMID1234)".to_string())
+    }
+
+    #[test]
+    fn identity_config_enables_signing() {
+        let config = SignConfig {
+            certificate: Some(identify()),
+            ..Default::default()
+        };
+        assert!(config.is_configured());
+    }
+
+    #[test]
+    fn from_file_config_maps_a_macos_identity() {
+        let file = SigningFileConfig {
+            certificate_identity: Some("Developer ID Application: Acme (TEAMID1234)".into()),
+            ..Default::default()
+        };
+
+        let config = SignConfig::from_file_config(&file).unwrap().unwrap();
+
+        assert_eq!(
+            config.certificate,
+            Some(CertificateSource::Identity(
+                "Developer ID Application: Acme (TEAMID1234)".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn from_file_config_rejects_an_identity_with_another_form() {
+        let file = SigningFileConfig {
+            certificate: Some("/c.pfx".into()),
+            certificate_identity: Some("Developer ID Application: Acme (TEAMID)".into()),
+            ..Default::default()
+        };
+
+        let err = SignConfig::from_file_config(&file).unwrap_err();
+
+        assert!(
+            matches!(err, SigningError::AmbiguousCertificate),
+            "a file and an identity are different signing identities, got: {err}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn codesign_sign_args_include_identity_timestamp_and_options() {
+        let config = SignConfig {
+            certificate: Some(identify()),
+            ..Default::default()
+        };
+
+        let args = codesign_sign_args(&config, None);
+
+        assert!(args.contains(&OsString::from("--sign")));
+        assert!(args.contains(&OsString::from(
+            "Developer ID Application: Acme (TEAMID1234)"
+        )));
+        assert!(args.contains(&OsString::from("--timestamp")));
+        assert!(args.contains(&OsString::from("--options")));
+        assert!(args.contains(&OsString::from("runtime")));
+        assert!(args.contains(&OsString::from("--force")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn codesign_sign_args_omit_entitlements_when_none_supplied() {
+        let config = SignConfig {
+            certificate: Some(identify()),
+            ..Default::default()
+        };
+
+        let args = codesign_sign_args(&config, None);
+        assert!(!args.contains(&OsString::from("--entitlements")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn codesign_sign_args_attach_entitlements_when_supplied() {
+        let config = SignConfig {
+            certificate: Some(identify()),
+            ..Default::default()
+        };
+
+        let args = codesign_sign_args(&config, Some(Path::new("/tmp/ent.plist")));
+        assert!(args.contains(&OsString::from("--entitlements")));
+        assert!(args.contains(&OsString::from("/tmp/ent.plist")));
+    }
+
+    #[test]
+    fn ad_hoc_identity_is_recognised() {
+        let adhoc = SignConfig {
+            certificate: Some(CertificateSource::Identity(AD_HOC_IDENTITY.into())),
+            ..Default::default()
+        };
+        assert!(is_ad_hoc(&adhoc));
+
+        let release = SignConfig {
+            certificate: Some(identify()),
+            ..Default::default()
+        };
+        assert!(
+            !is_ad_hoc(&release),
+            "a Developer ID identity is not ad-hoc signing"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ad_hoc_signing_skips_timestamp_and_hardened_runtime() {
+        let config = SignConfig {
+            certificate: Some(CertificateSource::Identity(AD_HOC_IDENTITY.into())),
+            ..Default::default()
+        };
+
+        let args = codesign_sign_args(&config, None);
+
+        // The timestamp authority rejects certificate-less signatures
+        // Requesting one would fail the whole sign
+        assert!(args.contains(&OsString::from("--timestamp=none")));
+        assert!(!args.contains(&OsString::from("--timestamp")));
+        assert!(
+            !args.contains(&OsString::from("runtime")),
+            "a hardened runtime on a dev signature reads as distributable"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sign_args_never_request_deep_signing() {
+        let config = SignConfig {
+            certificate: Some(identify()),
+            ..Default::default()
+        };
+
+        // Apple deprecated --deep for signing; nested code is signed first
+        assert!(!codesign_sign_args(&config, None).contains(&OsString::from("--deep")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn codesign_verify_args_are_conservative() {
+        assert_eq!(
+            codesign_verify_args(Path::new("/MyApp.app")),
+            os(&["--verify", "--deep", "--strict", "/MyApp.app"])
+        );
+    }
+
+    #[test]
+    fn should_sign_ignores_macho_binaries() {
+        let dir = tmp();
+        let macho = dir.path().join("myapp");
+        fs::write(&macho, [0xFE, 0xED, 0xFA, 0xCF, 0x00, 0x01, 0x00, 0x00]).unwrap();
+
+        assert!(!should_sign(&macho));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn codesign_refuses_a_certificate_file() {
+        let dir = tmp();
+        let target = dir.path().join("myapp");
+        fs::write(&target, b"mach-o").unwrap();
+
+        let config = SignConfig {
+            certificate: Some(CertificateSource::File {
+                path: "/c.pfx".into(),
+                password_env: None,
+            }),
+            ..Default::default()
+        };
+
+        let err = sign_with_codesign(&target, Path::new("/usr/bin/codesign"), &config).unwrap_err();
+
+        assert!(matches!(err, SigningError::NoSigningIdentity), "got: {err}");
     }
 }

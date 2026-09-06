@@ -65,6 +65,7 @@ pub fn anchor_path(project_root: &Path, path: &Path) -> PathBuf {
 #[serde(default, rename_all = "kebab-case")]
 pub struct AppConfig {
     pub name: Option<String>,
+    pub identifier: Option<String>,
     pub frontend: Option<PathBuf>,
     pub frontend_dist: Option<PathBuf>,
     pub frontend_build: Option<String>,
@@ -81,6 +82,9 @@ impl AppConfig {
     pub fn apply_to(&self, metadata: &mut AppMetadata) {
         if let Some(name) = &self.name {
             metadata.name = name.clone();
+        }
+        if let Some(identifier) = &self.identifier {
+            metadata.identifier = Some(identifier.clone());
         }
         if let Some(publisher) = &self.publisher {
             metadata.publisher = Some(publisher.clone());
@@ -158,8 +162,9 @@ impl Default for WindowsPackagingConfig {
 
 /// Code signing configuration.
 ///
-/// A certificate is supplied either as a file (`certificate`) or as a Windows
-/// certificate store thumbprint (`certificate-thumbprint`), never both.
+/// A certificate is supplied as a file (`certificate`), a Windows certificate
+/// store thumbprint (`certificate-thumbprint`), or a macOS codesign identity
+/// (`certificate-identity`). At most one of the three forms may be set.
 ///
 /// Passwords are never stored here: `certificate-password-env` names the
 /// environment variable the password is read from, so CI keeps it in secrets
@@ -169,6 +174,7 @@ impl Default for WindowsPackagingConfig {
 pub struct SigningFileConfig {
     pub certificate: Option<PathBuf>,
     pub certificate_thumbprint: Option<String>,
+    pub certificate_identity: Option<String>,
     pub certificate_password_env: Option<String>,
     pub timestamp_url: Option<String>,
     pub digest_algorithm: Option<String>,
@@ -341,6 +347,29 @@ certificate-password-env = "KUROGANE_CERT_PASSWORD"
         assert!(
             config.signing.certificate.is_none(),
             "a thumbprint is not a certificate file"
+        );
+    }
+
+    #[test]
+    fn signing_accepts_a_macos_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(
+            dir.path(),
+            r#"
+[signing]
+certificate-identity = "Developer ID Application: Acme (TEAMID1234)"
+"#,
+        );
+
+        let config = PackagingConfig::load(dir.path()).unwrap();
+
+        assert_eq!(
+            config.signing.certificate_identity.as_deref(),
+            Some("Developer ID Application: Acme (TEAMID1234)")
+        );
+        assert!(
+            config.signing.certificate.is_none() && config.signing.certificate_thumbprint.is_none(),
+            "an identity is neither a certificate file nor a thumbprint"
         );
     }
 

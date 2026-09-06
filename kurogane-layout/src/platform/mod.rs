@@ -18,3 +18,6 @@ mod macos;
 
 #[cfg(target_os = "macos")]
 pub use macos::link_unbundled_angle_libraries;
+
+#[cfg(target_os = "macos")]
+pub(crate) use macos::MACOS_FRAMEWORK;

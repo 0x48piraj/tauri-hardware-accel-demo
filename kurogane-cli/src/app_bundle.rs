@@ -1,0 +1,576 @@
+//! Assembles macOS .app bundles.
+//!
+//! CEF is placed under `Contents/Frameworks`, frontend and extra resources
+//! under `Contents/Resources` and the executable under `Contents/MacOS`.
+//!
+//! The CEF framework is signed before the enclosing app.
+
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+
+use anyhow::{Result, bail};
+use kurogane_layout::{AppMetadata, SignConfig, copy_dir, sign_app_bundle, validate_cef_runtime};
+
+use crate::tui;
+
+/// Frontend resources live under `Contents/Resources/content`.
+const CONTENT_DIR: &str = "content";
+
+/// Returns `Contents/MacOS`.
+fn macos_dir(app_dir: &Path) -> std::path::PathBuf {
+    app_dir.join("Contents").join("MacOS")
+}
+
+/// Returns `Contents/Frameworks`.
+fn frameworks_dir(app_dir: &Path) -> std::path::PathBuf {
+    app_dir.join("Contents").join("Frameworks")
+}
+
+/// Returns `Contents/Resources`.
+fn resources_dir(app_dir: &Path) -> std::path::PathBuf {
+    app_dir.join("Contents").join("Resources")
+}
+
+/// Escapes a value for an XML `<string>` in `Info.plist`.
+///
+/// Unescaped XML characters produce an invalid plist.
+fn plist_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Generates `Contents/Info.plist` for the bundle.
+fn write_info_plist(app_dir: &Path, meta: &AppMetadata, exe_name: &str, icon: bool) -> Result<()> {
+    let bundle_identifier = plist_escape(
+        &meta
+            .identifier
+            .clone()
+            .unwrap_or_else(|| default_identifier(&meta.name)),
+    );
+
+    let name = plist_escape(&meta.name);
+    let exe = plist_escape(exe_name);
+    let version = plist_escape(&meta.version);
+
+    // Reference the icon only when one was actually installed;
+    // a dangling CFBundleIconFile leaves the app with no icon at all
+    let icon_entry = if icon {
+        "    <key>CFBundleIconFile</key>\n    <string>AppIcon</string>\n"
+    } else {
+        ""
+    };
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>{name}</string>
+    <key>CFBundleDisplayName</key>
+    <string>{name}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{bundle_identifier}</string>
+    <key>CFBundleExecutable</key>
+    <string>{exe}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>{version}</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
+{icon_entry}    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+</dict>
+</plist>
+"#,
+        name = name,
+        bundle_identifier = bundle_identifier,
+        exe = exe,
+        version = version,
+        icon_entry = icon_entry,
+    );
+
+    fs::write(app_dir.join("Contents").join("Info.plist"), plist)?;
+    Ok(())
+}
+
+/// Fallback bundle identifier for projects that do not set `[app].identifier`.
+///
+/// Usable for local builds; Developer ID distribution needs an identifier
+/// under the signing team's own domain, hence the config key.
+///
+/// `CFBundleIdentifier` is specified as ASCII alphanumerics, `-` and `.`, so
+/// anything else in the name becomes a hyphen. A non-ASCII identifier fails
+/// notarization and confuses keychain and LaunchServices identity matching.
+fn default_identifier(name: &str) -> String {
+    let slug: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+
+    format!("com.kurogane.{slug}")
+}
+
+/// Installs the configured icon as `AppIcon.icns`.
+///
+/// Returns whether an icon was installed.
+fn install_icon(resources: &Path, icon: &Path) -> Result<bool> {
+    if !icon.exists() {
+        tui::warn(&format!(
+            "configured icon '{}' does not exist; bundling without it",
+            icon.display()
+        ));
+
+        return Ok(false);
+    }
+
+    let ext = icon.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let is_icns = ext.eq_ignore_ascii_case("icns");
+
+    if is_icns {
+        fs::copy(icon, resources.join("AppIcon.icns"))?;
+        return Ok(true);
+    }
+
+    // `sips` converts raster images to `.icns`
+    let out = resources.join("AppIcon.icns");
+    let status = std::process::Command::new("sips")
+        .arg("-s")
+        .arg("format")
+        .arg("icns")
+        .arg(icon)
+        .arg("--out")
+        .arg(&out)
+        .status();
+
+    // An icon failure does not prevent the bundle from being created
+    let status = match status {
+        Ok(status) => status,
+
+        Err(e) => {
+            let _ = fs::remove_file(&out);
+            tui::warn(&format!(
+                "could not run sips ({e}); bundling without an icon"
+            ));
+
+            return Ok(false);
+        }
+    };
+
+    if !status.success() {
+        let _ = fs::remove_file(&out);
+        tui::warn(&format!(
+            "sips could not convert icon '{}' to .icns; bundling without it",
+            icon.display()
+        ));
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+/// Builds and optionally signs a macOS `.app` bundle.
+pub fn build(
+    dist: &kurogane_layout::ResolvedDistribution,
+    output_dir: &Path,
+    sign_config: Option<&SignConfig>,
+) -> Result<std::path::PathBuf> {
+    let app_name = dist.metadata.name.clone();
+    let app_dir = output_dir.join(format!("{app_name}.app"));
+
+    if app_dir.exists() {
+        fs::remove_dir_all(&app_dir)?;
+    }
+
+    fs::create_dir_all(macos_dir(&app_dir))?;
+    fs::create_dir_all(frameworks_dir(&app_dir))?;
+    fs::create_dir_all(resources_dir(&app_dir))?;
+
+    let exe_name = dist.metadata.exe_name.clone();
+    let exe_dest = macos_dir(&app_dir).join(&exe_name);
+
+    // Main executable
+    fs::copy(&dist.executable, &exe_dest)?;
+    fs::set_permissions(&exe_dest, fs::Permissions::from_mode(0o755))?;
+
+    // CEF framework
+    let framework_src = dist
+        .cef_runtime
+        .join("Chromium Embedded Framework.framework");
+    if !framework_src.exists() {
+        bail!(
+            "CEF runtime at {} does not contain the Chromium Embedded Framework.framework",
+            dist.cef_runtime.display()
+        );
+    }
+    copy_dir(
+        &framework_src,
+        &frameworks_dir(&app_dir).join("Chromium Embedded Framework.framework"),
+    )?;
+
+    // Validate the placed framework
+    validate_cef_runtime(&frameworks_dir(&app_dir))?;
+
+    // Icon, before the plist so it can reference it only when present
+    let icon = match &dist.metadata.icon {
+        Some(icon) => install_icon(&resources_dir(&app_dir), icon)?,
+        None => false,
+    };
+
+    write_info_plist(&app_dir, &dist.metadata, &exe_name, icon)?;
+
+    // Frontend resources
+    if let Some(frontend) = &dist.frontend {
+        copy_dir(frontend, &resources_dir(&app_dir).join(CONTENT_DIR))?;
+    }
+
+    // Extra resources
+    for resource in &dist.extra_resources {
+        let dest = resources_dir(&app_dir).join(&resource.destination);
+        if resource.source.is_dir() {
+            copy_dir(&resource.source, &dest)?;
+        } else {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&resource.source, &dest)?;
+        }
+    }
+
+    // Signing (optional); Entitlements are a signing input, not an app
+    // resource, so the plist is written beside the bundle and removed again
+    // rather than sealed into Contents/Resources
+    if let Some(config) = sign_config {
+        let entitlements = output_dir.join(format!("{app_name}.entitlements.plist"));
+        fs::write(&entitlements, CEF_ENTITLEMENTS)?;
+
+        let signed = sign_app_bundle(&app_dir, config, Some(&entitlements));
+        let _ = fs::remove_file(&entitlements);
+        signed?;
+
+        tui::field("signed", format!("{app_name}.app"));
+    }
+
+    Ok(app_dir)
+}
+
+/// Entitlements required by the embedded Chromium runtime.
+///
+/// CEF needs `allow-jit` for its V8 engine, unsigned executable memory for
+/// generated code and `disable-library-validation` because it loads ANGLE /
+/// SwiftShader dylibs that are not Apple-signed.
+const CEF_ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kurogane_layout::{AppMetadata, ResolvedDistribution, ResolvedResource};
+
+    fn sample_metadata() -> AppMetadata {
+        AppMetadata {
+            name: "MyApp".to_string(),
+            version: "1.0.0".to_string(),
+            exe_name: "myapp".to_string(),
+            identifier: None,
+            publisher: None,
+            description: None,
+            copyright: None,
+            icon: None,
+        }
+    }
+
+    fn write_executable(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"mach-o").unwrap();
+    }
+
+    // Minimal CEF framework shape required by `validate_cef_runtime`
+    fn framework_fixture(root: &Path) {
+        let fw = root.join("Chromium Embedded Framework.framework");
+        let resources = fw.join("Resources");
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(fw.join("Chromium Embedded Framework"), b"binary").unwrap();
+        fs::write(resources.join("icudtl.dat"), b"").unwrap();
+        fs::create_dir_all(resources.join("en.lproj")).unwrap();
+        fs::write(resources.join("v8_context_snapshot.arm64.bin"), b"").unwrap();
+    }
+
+    #[test]
+    fn writes_contents_macos_frameworks_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let cef = dir.path().join("cef");
+        framework_fixture(&cef);
+
+        let exe = dir.path().join("target").join("release").join("myapp");
+        write_executable(&exe);
+
+        let dist = ResolvedDistribution {
+            metadata: sample_metadata(),
+            executable: exe,
+            frontend: None,
+            cef_runtime: cef,
+            extra_resources: Vec::new(),
+        };
+
+        let output = dir.path().join("dist");
+        let app_dir = build(&dist, &output, None).unwrap();
+
+        // Avoid asserting on platform tooling unavailable in every test environment
+        assert!(
+            app_dir
+                .join("Contents")
+                .join("MacOS")
+                .join("myapp")
+                .exists()
+        );
+        assert!(
+            app_dir
+                .join("Contents")
+                .join("Frameworks")
+                .join("Chromium Embedded Framework.framework")
+                .join("Chromium Embedded Framework")
+                .exists()
+        );
+        assert!(app_dir.join("Contents").join("Info.plist").exists());
+    }
+
+    #[test]
+    fn info_plist_contains_required_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let contents = dir.path().join("Contents");
+        fs::create_dir_all(&contents).unwrap();
+
+        write_info_plist(dir.path(), &sample_metadata(), "myapp", false).unwrap();
+
+        let plist = fs::read_to_string(contents.join("Info.plist")).unwrap();
+        assert!(plist.contains("<key>CFBundleExecutable</key>"));
+        assert!(plist.contains("<string>myapp</string>"));
+        assert!(plist.contains("<key>CFBundleIdentifier</key>"));
+        assert!(plist.contains("<key>CFBundlePackageType</key>"));
+        assert!(plist.contains("<string>APPL</string>"));
+    }
+
+    #[test]
+    fn build_without_signing_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let cef = dir.path().join("cef");
+        framework_fixture(&cef);
+        let exe = dir.path().join("target").join("release").join("myapp");
+        write_executable(&exe);
+
+        let dist = ResolvedDistribution {
+            metadata: sample_metadata(),
+            executable: exe,
+            frontend: None,
+            cef_runtime: cef,
+            extra_resources: Vec::new(),
+        };
+
+        let output = dir.path().join("dist");
+        let app_dir = build(&dist, &output, None).unwrap();
+        assert!(app_dir.exists());
+    }
+
+    #[test]
+    fn frontend_lands_in_resources_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let cef = dir.path().join("cef");
+        framework_fixture(&cef);
+        let exe = dir.path().join("target").join("release").join("myapp");
+        write_executable(&exe);
+
+        let frontend = dir.path().join("web").join("dist");
+        fs::create_dir_all(&frontend).unwrap();
+        fs::write(frontend.join("index.html"), b"<html></html>").unwrap();
+
+        let dist = ResolvedDistribution {
+            metadata: sample_metadata(),
+            executable: exe,
+            frontend: Some(frontend),
+            cef_runtime: cef,
+            extra_resources: Vec::new(),
+        };
+
+        let output = dir.path().join("dist");
+        let app_dir = build(&dist, &output, None).unwrap();
+
+        // Contents/Resources is the bundle resource root
+        assert!(
+            app_dir
+                .join("Contents/Resources/content/index.html")
+                .exists(),
+            "frontend must be delivered at Contents/Resources/content/"
+        );
+    }
+
+    #[test]
+    fn delivered_bundle_has_no_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let cef = dir.path().join("cef");
+        framework_fixture(&cef);
+
+        // Bundled files must not depend on symlinks in the build tree
+        let libraries = cef
+            .join("Chromium Embedded Framework.framework")
+            .join("Libraries");
+        fs::create_dir_all(&libraries).unwrap();
+        let real = dir.path().join("libGLESv2.dylib");
+        fs::write(&real, b"dylib").unwrap();
+        std::os::unix::fs::symlink(&real, libraries.join("libGLESv2.dylib")).unwrap();
+
+        let exe = dir.path().join("target").join("release").join("myapp");
+        write_executable(&exe);
+
+        let dist = ResolvedDistribution {
+            metadata: sample_metadata(),
+            executable: exe,
+            frontend: None,
+            cef_runtime: cef,
+            extra_resources: Vec::new(),
+        };
+
+        let output = dir.path().join("dist");
+        let app_dir = build(&dist, &output, None).unwrap();
+
+        let mut links = Vec::new();
+        let mut stack = vec![app_dir.clone()];
+        while let Some(path) = stack.pop() {
+            for entry in fs::read_dir(&path).unwrap() {
+                let entry = entry.unwrap();
+                let meta = entry.path().symlink_metadata().unwrap();
+                if meta.file_type().is_symlink() {
+                    links.push(entry.path());
+                } else if meta.is_dir() {
+                    stack.push(entry.path());
+                }
+            }
+        }
+
+        assert!(
+            links.is_empty(),
+            "delivered bundle contains symlinks: {links:?}"
+        );
+        assert_eq!(
+            fs::read(app_dir.join(
+                "Contents/Frameworks/Chromium Embedded Framework.framework/Libraries/libGLESv2.dylib"
+            ))
+            .unwrap(),
+            b"dylib",
+            "the symlink must be materialized with its contents"
+        );
+    }
+
+    #[test]
+    fn info_plist_references_the_icon_only_when_one_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("Contents")).unwrap();
+
+        write_info_plist(dir.path(), &sample_metadata(), "myapp", false).unwrap();
+        let without = fs::read_to_string(dir.path().join("Contents/Info.plist")).unwrap();
+        assert!(!without.contains("CFBundleIconFile"));
+
+        write_info_plist(dir.path(), &sample_metadata(), "myapp", true).unwrap();
+        let with = fs::read_to_string(dir.path().join("Contents/Info.plist")).unwrap();
+        assert!(with.contains("<key>CFBundleIconFile</key>"));
+        assert!(with.contains("<string>AppIcon</string>"));
+    }
+
+    #[test]
+    fn configured_identifier_overrides_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("Contents")).unwrap();
+
+        let mut meta = sample_metadata();
+        meta.identifier = Some("com.example.myapp".to_string());
+        write_info_plist(dir.path(), &meta, "myapp", false).unwrap();
+
+        let plist = fs::read_to_string(dir.path().join("Contents/Info.plist")).unwrap();
+        assert!(plist.contains("<string>com.example.myapp</string>"));
+        assert!(!plist.contains("com.kurogane."));
+    }
+
+    #[test]
+    fn default_identifier_is_a_reverse_dns_slug() {
+        assert_eq!(default_identifier("My App"), "com.kurogane.my-app");
+    }
+
+    #[test]
+    fn default_identifier_is_ascii_only() {
+        // Bundle identifiers must be ASCII
+        let identifier = default_identifier("Café");
+
+        assert_eq!(identifier, "com.kurogane.caf-");
+        assert!(identifier.is_ascii(), "{identifier} must be ASCII");
+    }
+
+    #[test]
+    fn info_plist_escapes_configured_values() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("Contents")).unwrap();
+
+        let mut meta = sample_metadata();
+        meta.name = "Ben & Jerry <Ltd>".to_string();
+
+        write_info_plist(dir.path(), &meta, "myapp", false).unwrap();
+
+        let plist = fs::read_to_string(dir.path().join("Contents/Info.plist")).unwrap();
+
+        // Unescaped XML would produce an invalid plist
+        assert!(plist.contains("<string>Ben &amp; Jerry &lt;Ltd&gt;</string>"));
+        assert!(!plist.contains("Ben & Jerry"));
+    }
+
+    #[test]
+    fn resources_land_in_resources_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let cef = dir.path().join("cef");
+        framework_fixture(&cef);
+        let exe = dir.path().join("target").join("release").join("myapp");
+        write_executable(&exe);
+        let asset = dir.path().join("asset.txt");
+        fs::write(&asset, b"data").unwrap();
+
+        let dist = ResolvedDistribution {
+            metadata: sample_metadata(),
+            executable: exe,
+            frontend: None,
+            cef_runtime: cef,
+            extra_resources: vec![ResolvedResource {
+                source: asset,
+                destination: "share/asset.txt".into(),
+            }],
+        };
+
+        let output = dir.path().join("dist");
+        let app_dir = build(&dist, &output, None).unwrap();
+        assert!(
+            app_dir
+                .join("Contents")
+                .join("Resources")
+                .join("share")
+                .join("asset.txt")
+                .exists()
+        );
+    }
+}

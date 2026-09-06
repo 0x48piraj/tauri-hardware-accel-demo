@@ -9,8 +9,10 @@ use std::process::Command;
 use cargo_metadata::{MetadataCommand, TargetKind};
 use kurogane_layout::{
     AppMetadata, PackagingConfig, ResolvedDistribution, SignConfig, anchor_path,
-    materialize_cef_runtime, package_directory, resolve_cef_for_bundle, sign_tree, verify_tree,
+    materialize_cef_runtime, resolve_cef_for_bundle,
 };
+#[cfg(not(target_os = "macos"))]
+use kurogane_layout::{package_directory, sign_tree, verify_tree};
 
 use crate::tui;
 
@@ -54,7 +56,7 @@ fn build_frontend(
 /// Output format for the application bundle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageFormat {
-    /// Plain directory bundle (default).
+    /// Plain directory bundle (default except on macOS).
     Directory,
     /// Linux AppImage.
     #[cfg(target_os = "linux")]
@@ -62,32 +64,53 @@ pub enum PackageFormat {
     /// Windows NSIS installer.
     #[cfg(target_os = "windows")]
     Nsis,
+    /// macOS `.app/.dmg` bundle.
+    #[cfg(target_os = "macos")]
+    AppBundle,
 }
+
+/// Default `--format`: the platform's native distributable.
+#[cfg(target_os = "macos")]
+pub(crate) const DEFAULT_FORMAT: &str = "app";
+
+/// Default `--format`: the platform's native distributable.
+#[cfg(not(target_os = "macos"))]
+pub(crate) const DEFAULT_FORMAT: &str = "dir";
 
 impl PackageFormat {
     /// The formats available on the current build platform.
     fn available() -> Vec<&'static str> {
         [
+            #[cfg(not(target_os = "macos"))]
             "dir; directory",
             #[cfg(target_os = "linux")]
             "appimage",
             #[cfg(target_os = "windows")]
             "nsis",
+            #[cfg(target_os = "macos")]
+            "app",
         ]
         .to_vec()
     }
 
     pub fn from_str(s: &str) -> Result<Self> {
         match s {
+            #[cfg(not(target_os = "macos"))]
             "dir" | "directory" => Ok(PackageFormat::Directory),
+            #[cfg(target_os = "macos")]
+            "dir" | "directory" => bail!(
+                "directory format is not supported on macOS; use `--format app` or `--format dmg`"
+            ),
             #[cfg(target_os = "linux")]
             "appimage" => Ok(PackageFormat::AppImage),
             #[cfg(target_os = "windows")]
             "nsis" => Ok(PackageFormat::Nsis),
+            #[cfg(target_os = "macos")]
+            "app" | "appbundle" => Ok(PackageFormat::AppBundle),
             _ => bail!(
                 "unsupported format: {s}\n\n\
                  Available on this platform: {}\n\
-                 (appimage requires Linux; nsis requires Windows)",
+                 (appimage requires Linux; nsis requires Windows; app requires macOS)",
                 Self::available().join(", ")
             ),
         }
@@ -114,6 +137,7 @@ fn resolve_resources(
 /// Signs and verifies all signable artifacts in a staged bundle.
 ///
 /// Warns when the bundle contains no signable artifacts.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn sign_and_verify_tree(root: &std::path::Path, config: &SignConfig) -> Result<()> {
     let signed = sign_tree(root, config)?;
 
@@ -143,7 +167,8 @@ fn resolve_sign_config(
     let mut resolved = SignConfig::from_file_config(&config.signing)?.ok_or_else(|| {
         anyhow::anyhow!(
             "--sign requested but no usable [signing] configuration found in {} \
-             (set `certificate`, `certificate-thumbprint` or `custom-command`)",
+             (set `certificate`, `certificate-thumbprint`, `certificate-identity` \
+             or `custom-command`)",
             kurogane_layout::CONFIG_FILE_NAME
         )
     })?;
@@ -197,7 +222,9 @@ pub fn run(debug: bool, format: PackageFormat, sign: bool) -> Result<()> {
     cmd.arg("build");
 
     // Skip cef-dll-sys's redundant runtime staging
-    cmd.args(crate::platform::cef_build_script_override(cef.root.as_path())?);
+    cmd.args(crate::platform::cef_build_script_override(
+        cef.root.as_path(),
+    )?);
 
     if debug {
         cmd.arg("--features").arg("kurogane/debug");
@@ -289,6 +316,7 @@ pub fn run(debug: bool, format: PackageFormat, sign: bool) -> Result<()> {
                 .unwrap_or_else(|| pkg.name.to_string()),
             version: pkg.version.to_string(),
             exe_name,
+            identifier: packaging_config.app.identifier.clone(),
             publisher: packaging_config.app.publisher.clone(),
             description: packaging_config.app.description.clone(),
             copyright: packaging_config.app.copyright.clone(),
@@ -317,6 +345,7 @@ pub fn run(debug: bool, format: PackageFormat, sign: bool) -> Result<()> {
     let sign_config = resolve_sign_config(sign, &packaging_config, project_root)?;
 
     match format {
+        #[cfg(not(target_os = "macos"))]
         PackageFormat::Directory => {
             // The canonical bundle is the artifact; sign it in place
             let output = package_directory(&dist, &output_dir)?;
@@ -337,6 +366,14 @@ pub fn run(debug: bool, format: PackageFormat, sign: bool) -> Result<()> {
         PackageFormat::Nsis => {
             crate::nsis::build(&dist, &output_dir, &packaging_config, sign_config.as_ref())?;
         }
+
+        #[cfg(target_os = "macos")]
+        PackageFormat::AppBundle => {
+            let app_dir = crate::app_bundle::build(&dist, &output_dir, sign_config.as_ref())?;
+            let name = dist.metadata.name.clone();
+            crate::dmg::build(&app_dir, &output_dir, &name)?;
+            tui::field("output", tui::format_path(&app_dir));
+        }
     }
 
     tui::blank();
@@ -351,6 +388,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn parses_directory_aliases() {
         assert!(matches!(
             PackageFormat::from_str("dir"),
@@ -360,6 +398,17 @@ mod tests {
             PackageFormat::from_str("directory"),
             Ok(PackageFormat::Directory)
         ));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn rejects_the_directory_format_with_a_pointer_to_app() {
+        for alias in ["dir", "directory"] {
+            let err = PackageFormat::from_str(alias).unwrap_err().to_string();
+
+            assert!(err.contains("not a macOS output"), "got: {err}");
+            assert!(err.contains("--format app"), "got: {err}");
+        }
     }
 
     #[test]

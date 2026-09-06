@@ -27,6 +27,12 @@ mod appimage;
 #[cfg(target_os = "windows")]
 mod nsis;
 
+#[cfg(target_os = "macos")]
+mod app_bundle;
+
+#[cfg(target_os = "macos")]
+mod dmg;
+
 mod collector;
 mod cache;
 mod template;
@@ -71,7 +77,7 @@ enum Commands {
     Bundle {
         #[arg(long)]
         debug: bool,
-        #[arg(long, default_value = "dir")]
+        #[arg(long, default_value = crate::bundle::DEFAULT_FORMAT)]
         format: String,
         /// Sign bundle binaries.
         #[arg(long)]

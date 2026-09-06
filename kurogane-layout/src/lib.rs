@@ -23,7 +23,10 @@ pub use config::{
     ResourceConfig, SigningFileConfig, WindowsPackagingConfig, CONFIG_FILE_NAME,
 };
 pub use distribution::{AppMetadata, DistributionError, ResolvedDistribution, ResolvedResource};
-pub use layout::{bundled_cef_root, cef_install_dir, copy_dir, install_root, installed_cef_root};
+pub use layout::{
+    bundled_cef_root, bundled_resource_root, cef_install_dir, copy_dir, install_root,
+    installed_cef_root,
+};
 pub use package::{PackageError, package_directory};
 pub use profile::{cache_root, profile_dir, PROFILE_HASH_HEX_DIGITS};
 #[cfg(target_os = "macos")]
@@ -32,3 +35,5 @@ pub use signing::{
     CertificateSource, SignConfig, SigningError, osslsigncode_sign_args, sign_artifact, sign_file,
     sign_tree, signtool_sign_args, signtool_verify_args, verify_signature, verify_tree,
 };
+#[cfg(target_os = "macos")]
+pub use signing::{codesign_sign_args, codesign_verify_args, sign_app_bundle};
