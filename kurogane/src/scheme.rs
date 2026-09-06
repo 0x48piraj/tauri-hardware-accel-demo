@@ -168,6 +168,8 @@ wrap_resource_handler! {
             handle_request: Option<&mut i32>,
             _callback: Option<&mut Callback>,
         ) -> i32 {
+            debug!("[app://] open: {} bytes to serve", self.data.len());
+
             self.offset.store(0, Ordering::Release);
 
             if let Some(hr) = handle_request {
@@ -188,6 +190,9 @@ wrap_resource_handler! {
 
             // FFI safety guard (invalid pointer or non-positive length)
             if bytes_to_read <= 0 || data_out.is_null() {
+                debug!("[app://] read: refused (bytes_to_read={bytes_to_read}, null={})",
+                    data_out.is_null());
+
                 *br = 0;
                 return 0;
             }
@@ -210,6 +215,12 @@ wrap_resource_handler! {
             }
 
             *br = read as i32;
+
+            debug!(
+                "[app://] read: {read} bytes at offset {offset} of {} ({} requested)",
+                data.len(),
+                bytes_to_read
+            );
 
             if read == 0 {
                 return 0; // EOF
@@ -234,6 +245,11 @@ wrap_resource_handler! {
             if let Some(len) = response_length {
                 *len = data_len;
             }
+
+            debug!(
+                "[app://] response_headers: status={} mime={} length={data_len}",
+                self.status, self.mime
+            );
         }
     }
 }
