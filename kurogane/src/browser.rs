@@ -34,11 +34,10 @@ wrap_browser_process_handler! {
 
             // Register once per request context
             if self.scheme_factory.borrow().is_none() {
-                debug!("Registering scheme handler factory for app://");
-
                 // Only register the app:// scheme when serving local assets.
                 // In URL mode (App::url), there is no asset root and no scheme handler.
                 if let Some(root) = &self.spec.asset_root {
+                    debug!("Registering scheme handler factory for app://");
                     // Create factory
                     let mut factory = crate::scheme::AppSchemeHandlerFactory::new(root.clone());
 
