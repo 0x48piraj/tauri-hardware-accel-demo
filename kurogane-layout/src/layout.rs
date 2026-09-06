@@ -74,10 +74,15 @@ fn bundled_cef_root_beside(dir: &Path) -> Option<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        // macOS: the framework sits beside the executable, or in the
+        // macOS: the framework sits beside the executable, in the
         // Contents/Frameworks of the application bundle whose Contents/MacOS
-        // the executable runs from.
-        for root in [dir.to_path_buf(), dir.join("..").join("Frameworks")] {
+        // the executable runs from, or three levels up for a helper app that
+        // lives in that Contents/Frameworks itself (CEF's helper layout).
+        for root in [
+            dir.to_path_buf(),
+            dir.join("..").join("Frameworks"),
+            dir.join("..").join("..").join(".."),
+        ] {
             if root.join("Chromium Embedded Framework.framework").exists() {
                 return Some(root);
             }
@@ -117,6 +122,27 @@ mod tests {
         assert_eq!(
             bundled_cef_root_beside(&exe_dir),
             Some(exe_dir.join("..").join("Frameworks"))
+        );
+    }
+
+    #[test]
+    fn framework_beside_the_helper_app_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let frameworks = dir
+            .path()
+            .join("App.app")
+            .join("Contents")
+            .join("Frameworks");
+        let exe_dir = frameworks
+            .join("App Helper.app")
+            .join("Contents")
+            .join("MacOS");
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::create_dir_all(frameworks.join(FRAMEWORK)).unwrap();
+
+        assert_eq!(
+            bundled_cef_root_beside(&exe_dir),
+            Some(exe_dir.join("..").join("..").join(".."))
         );
     }
 
