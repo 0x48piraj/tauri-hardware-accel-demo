@@ -2,6 +2,7 @@
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use kurogane_layout::detect_cef_root_with_version;
@@ -60,6 +61,43 @@ pub fn init_ns_app() -> Result<(), RuntimeError> {
     assert!(NSApp(mtm).isKindOfClass(SimpleApplication::class()));
 
     Ok(())
+}
+
+/// The helper app CEF's subprocesses run as inside an application bundle.
+///
+/// `X.app/Contents/MacOS/<exe>` resolves to
+/// `X.app/Contents/Frameworks/X Helper.app/Contents/MacOS/X Helper`, the
+/// layout CEF documents for `browser_subprocess_path`; Chromium derives the
+/// per-role variants (`X Helper (Renderer)`, `(GPU)`, `(Plugin)`, `(Alerts)`)
+/// from it, and inside a bundle it launches the renderer through that
+/// derivation alone, so without the helper apps no renderer ever starts.
+/// `None` outside a bundle, or when the bundle ships no helper: the
+/// executable itself is then re-executed for every role.
+pub fn helper_app(exe: &Path) -> Option<PathBuf> {
+    let helper = helper_app_path(exe)?;
+
+    helper.is_file().then_some(helper)
+}
+
+/// The helper executable's path for `exe`, whether or not it exists.
+fn helper_app_path(exe: &Path) -> Option<PathBuf> {
+    let contents = exe.parent()?.parent()?;
+    let bundle = contents.parent()?;
+
+    if bundle.extension()? != "app" {
+        return None;
+    }
+
+    let helper = format!("{} Helper", bundle.file_stem()?.to_str()?);
+
+    Some(
+        contents
+            .join("Frameworks")
+            .join(format!("{helper}.app"))
+            .join("Contents")
+            .join("MacOS")
+            .join(helper),
+    )
 }
 
 /// Installs the application delegate for the process lifetime.
@@ -202,5 +240,31 @@ mod application {
             #[unsafe(method(isHandlingSendEvent))]
             fn is_handling_send_event(&self) -> bool;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helper_app_follows_cef_layout() {
+        let exe = Path::new("/Applications/Lich.app/Contents/MacOS/lich-shell");
+
+        assert_eq!(
+            helper_app_path(exe),
+            Some(PathBuf::from(
+                "/Applications/Lich.app/Contents/Frameworks/Lich Helper.app/Contents/MacOS/Lich Helper"
+            ))
+        );
+    }
+
+    #[test]
+    fn no_bundle_means_no_helper() {
+        assert_eq!(helper_app_path(Path::new("/usr/local/bin/app")), None);
+        assert_eq!(
+            helper_app_path(Path::new("/opt/app/target/release/app")),
+            None
+        );
     }
 }

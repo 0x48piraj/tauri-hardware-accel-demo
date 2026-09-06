@@ -80,6 +80,7 @@ fn build_settings(
     // Use a persistent profile instead of CEF's default incognito mode
     // This enables cookies, storage APIs and service workers
 
+    #[cfg(not(target_os = "macos"))]
     let exe_str = layout.exe.to_string_lossy();
     #[cfg(not(target_os = "macos"))]
     let cef_root_str = layout.cef_root.to_string_lossy();
@@ -104,9 +105,13 @@ fn build_settings(
 
     #[cfg(target_os = "macos")]
     {
+        // Inside a bundle the subprocesses run as the helper app; outside one
+        // the executable re-executes itself
+        let subprocess =
+            crate::platform::macos::helper_app(&layout.exe).unwrap_or_else(|| layout.exe.clone());
         // CEF resolves resources, locales and V8 snapshots from the framework bundle
         let mut s = Settings {
-            browser_subprocess_path: CefString::from(exe_str.as_ref()),
+            browser_subprocess_path: CefString::from(subprocess.to_string_lossy().as_ref()),
             external_message_pump: external_message_pump as i32,
             cache_path: CefString::from(layout.cache_dir.to_string_lossy().as_ref()),
             root_cache_path: CefString::from(layout.cache_dir.to_string_lossy().as_ref()),
