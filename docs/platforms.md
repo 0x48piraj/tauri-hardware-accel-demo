@@ -59,6 +59,8 @@ Requires CMake and Ninja.
 
 Distribution does not. App bundling, code signing and `.app` packaging are not implemented, so `kurogane bundle` does not yet produce an artifact you can ship.
 
+A host that lays out its own `.app` can still ship the runtime: the framework is resolved beside the executable or in the bundle's `Contents/Frameworks`, so `Contents/MacOS/<app>` next to `Contents/Frameworks/Chromium Embedded Framework.framework` is a valid bundled layout, and a helper app inside that `Contents/Frameworks` finds the framework beside itself.
+
 Treat macOS as usable for development and not yet for release.
 
 ### GPU libraries in development
