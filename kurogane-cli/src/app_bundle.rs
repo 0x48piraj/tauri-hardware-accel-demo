@@ -9,7 +9,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use kurogane_layout::{AppMetadata, SignConfig, copy_dir, sign_app_bundle, validate_cef_runtime};
 
 use crate::tui;
@@ -100,7 +100,9 @@ fn write_info_plist(app_dir: &Path, meta: &AppMetadata, exe_name: &str, icon: bo
         icon_entry = icon_entry,
     );
 
-    fs::write(app_dir.join("Contents").join("Info.plist"), plist)?;
+    let plist_path = app_dir.join("Contents").join("Info.plist");
+    fs::write(&plist_path, plist)
+        .with_context(|| format!("failed to write {}", plist_path.display()))?;
     Ok(())
 }
 
@@ -167,7 +169,9 @@ fn write_helper_plist(
         version = plist_escape(version),
     );
 
-    fs::write(helper_app.join("Contents").join("Info.plist"), plist)?;
+    let plist_path = helper_app.join("Contents").join("Info.plist");
+    fs::write(&plist_path, plist)
+        .with_context(|| format!("failed to write {}", plist_path.display()))?;
 
     Ok(())
 }
@@ -185,12 +189,20 @@ fn install_helpers(
         let helper_app = frameworks.join(format!("{helper_name}.app"));
         let macos = helper_app.join("Contents").join("MacOS");
 
-        fs::create_dir_all(&macos)?;
+        fs::create_dir_all(&macos)
+            .with_context(|| format!("failed to create directory {}", macos.display()))?;
 
         let helper_exe = macos.join(&helper_name);
 
-        fs::copy(executable, &helper_exe)?;
-        fs::set_permissions(&helper_exe, fs::Permissions::from_mode(0o755))?;
+        fs::copy(&executable, &helper_exe).with_context(|| {
+            format!(
+                "failed to copy {} to {}",
+                executable.display(),
+                helper_exe.display()
+            )
+        })?;
+        fs::set_permissions(&helper_exe, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("failed to set permissions on {}", helper_exe.display()))?;
 
         write_helper_plist(
             &helper_app,
@@ -220,7 +232,9 @@ fn install_icon(resources: &Path, icon: &Path) -> Result<bool> {
     let is_icns = ext.eq_ignore_ascii_case("icns");
 
     if is_icns {
-        fs::copy(icon, resources.join("AppIcon.icns"))?;
+        let dest = resources.join("AppIcon.icns");
+        fs::copy(icon, &dest)
+            .with_context(|| format!("failed to copy {} to {}", icon.display(), dest.display()))?;
         return Ok(true);
     }
 
@@ -271,19 +285,32 @@ pub fn build(
     let app_dir = output_dir.join(format!("{app_name}.app"));
 
     if app_dir.exists() {
-        fs::remove_dir_all(&app_dir)?;
+        fs::remove_dir_all(&app_dir)
+            .with_context(|| format!("failed to remove directory {}", app_dir.display()))?;
     }
 
-    fs::create_dir_all(macos_dir(&app_dir))?;
-    fs::create_dir_all(frameworks_dir(&app_dir))?;
-    fs::create_dir_all(resources_dir(&app_dir))?;
+    for dir in [
+        macos_dir(&app_dir),
+        frameworks_dir(&app_dir),
+        resources_dir(&app_dir),
+    ] {
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create directory {}", dir.display()))?;
+    }
 
     let exe_name = dist.metadata.exe_name.clone();
     let exe_dest = macos_dir(&app_dir).join(&exe_name);
 
     // Main executable
-    fs::copy(&dist.executable, &exe_dest)?;
-    fs::set_permissions(&exe_dest, fs::Permissions::from_mode(0o755))?;
+    fs::copy(&dist.executable, &exe_dest).with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            dist.executable.display(),
+            exe_dest.display()
+        )
+    })?;
+    fs::set_permissions(&exe_dest, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("failed to set permissions on {}", exe_dest.display()))?;
 
     // CEF framework
     let framework_src = dist
@@ -333,9 +360,16 @@ pub fn build(
             copy_dir(&resource.source, &dest)?;
         } else {
             if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent)?;
+                fs::create_dir_all(&parent)
+                    .with_context(|| format!("failed to create directory {}", parent.display()))?;
             }
-            fs::copy(&resource.source, &dest)?;
+            fs::copy(&resource.source, &dest).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    resource.source.display(),
+                    dest.display()
+                )
+            })?;
         }
     }
 
@@ -344,7 +378,8 @@ pub fn build(
     // rather than sealed into Contents/Resources
     if let Some(config) = sign_config {
         let entitlements = output_dir.join(format!("{app_name}.entitlements.plist"));
-        fs::write(&entitlements, CEF_ENTITLEMENTS)?;
+        fs::write(&entitlements, CEF_ENTITLEMENTS)
+            .with_context(|| format!("failed to write {}", entitlements.display()))?;
 
         let signed = sign_app_bundle(&app_dir, config, Some(&entitlements));
         let _ = fs::remove_file(&entitlements);

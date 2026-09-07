@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::tui;
 
@@ -17,7 +17,8 @@ pub fn build(app_dir: &Path, output_dir: &Path, name: &str) -> Result<std::path:
     let dmg_path = dmg_path(output_dir, name);
 
     if dmg_path.exists() {
-        fs::remove_file(&dmg_path)?;
+        fs::remove_file(&dmg_path)
+            .with_context(|| format!("failed to remove {}", dmg_path.display()))?;
     }
 
     let status = std::process::Command::new("hdiutil")

@@ -3,7 +3,7 @@
 //! This module constructs an AppDir around the canonical Kurogane
 //! bundle and uses linuxdeploy to produce the AppImage artifact.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -73,13 +73,15 @@ fn tools_dir() -> Result<PathBuf> {
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("kurogane")
         .join("tools");
-    fs::create_dir_all(&dir)?;
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create directory {}", dir.display()))?;
     Ok(dir)
 }
 
 fn write_and_make_executable(path: &Path, data: &[u8]) -> Result<()> {
-    fs::write(path, data)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    fs::write(path, data).with_context(|| format!("failed to write {}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("failed to set permissions on {}", path.display()))?;
     Ok(())
 }
 
@@ -209,8 +211,10 @@ fn build_appdir(
     // AppImage entrypoint
     let apprun_content = generate_apprun(name, exe_name);
     let apprun_path = app_dir.join("AppRun");
-    fs::write(&apprun_path, &apprun_content)?;
-    fs::set_permissions(&apprun_path, fs::Permissions::from_mode(0o755))?;
+    fs::write(&apprun_path, &apprun_content)
+        .with_context(|| format!("failed to write {}", apprun_path.display()))?;
+    fs::set_permissions(&apprun_path, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("failed to set permissions on {}", apprun_path.display()))?;
 
     // Desktop entry
     let categories = config.linux.categories.as_deref().unwrap_or_default();
@@ -218,7 +222,8 @@ fn build_appdir(
     let desktop_content =
         generate_desktop(name, exe_name, &dist.metadata.version, categories, terminal);
     let desktop_dir = app_dir.join("usr").join("share").join("applications");
-    fs::create_dir_all(&desktop_dir)?;
+    fs::create_dir_all(&desktop_dir)
+        .with_context(|| format!("failed to create directory {}", desktop_dir.display()))?;
     fs::write(
         desktop_dir.join(format!("{name}.desktop")),
         &desktop_content,
@@ -232,7 +237,8 @@ fn build_appdir(
         .join("hicolor")
         .join("256x256")
         .join("apps");
-    fs::create_dir_all(&icon_dir)?;
+    fs::create_dir_all(&icon_dir)
+        .with_context(|| format!("failed to create directory {}", icon_dir.display()))?;
     let icon_path = icon_dir.join(format!("{name}.png"));
 
     match &dist.metadata.icon {
@@ -240,7 +246,13 @@ fn build_appdir(
             if !icon.exists() {
                 bail!("configured icon not found: {}", icon.display());
             }
-            fs::copy(icon, &icon_path)?;
+            fs::copy(icon, &icon_path).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    icon.display(),
+                    icon_path.display()
+                )
+            })?;
         }
         None => write_placeholder_icon(&icon_path)?,
     }
@@ -258,7 +270,7 @@ fn write_placeholder_icon(path: &Path) -> Result<()> {
         0xcf, 0xc0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc, 0x33, 0x00, 0x00, 0x00,
         0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
     ];
-    fs::write(path, png)?;
+    fs::write(path, png).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
@@ -278,9 +290,11 @@ pub fn build(
 
     // Clean output
     if output_dir.exists() {
-        fs::remove_dir_all(output_dir)?;
+        fs::remove_dir_all(output_dir)
+            .with_context(|| format!("failed to remove directory {}", output_dir.display()))?;
     }
-    fs::create_dir_all(output_dir)?;
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("failed to create directory {}", output_dir.display()))?;
 
     let appimage_name = format!("{}_{}_{arch}", dist.metadata.name, dist.metadata.version);
     let app_dir = output_dir.join(format!("{appimage_name}.AppDir"));
@@ -322,7 +336,8 @@ pub fn build(
     }
 
     // Remove intermediate AppDir
-    fs::remove_dir_all(&app_dir)?;
+    fs::remove_dir_all(&app_dir)
+        .with_context(|| format!("failed to remove directory {}", app_dir.display()))?;
 
     tui::field("appimage", tui::format_path(&appimage_path));
 

@@ -97,7 +97,8 @@ pub fn acquire_in(root: &Path, url: &str) -> Result<Acquired> {
         }
     }
 
-    std::fs::create_dir_all(root)?;
+    std::fs::create_dir_all(root)
+        .with_context(|| format!("failed to create directory {}", root.display()))?;
 
     let mut builder = git2::build::RepoBuilder::new();
     builder

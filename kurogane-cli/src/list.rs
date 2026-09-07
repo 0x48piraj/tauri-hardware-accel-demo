@@ -3,7 +3,7 @@
 //! This module provides human-readable summaries of Kurogane-managed
 //! CEF versions and application runtime profiles.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use kurogane_layout::{cache_root, PROFILE_HASH_HEX_DIGITS};
 
@@ -42,7 +42,10 @@ fn list_profiles() -> Result<()> {
     let hash_width = PROFILE_HASH_HEX_DIGITS;
     let min_profile_name = hash_width + 1; // at least one app character and the "-" separator
 
-    for entry in fs::read_dir(&profiles_dir)? {
+    let entries = fs::read_dir(&profiles_dir)
+        .with_context(|| format!("failed to read directory {}", profiles_dir.display()))?;
+
+    for entry in entries {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;

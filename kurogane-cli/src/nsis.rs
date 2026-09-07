@@ -1,6 +1,6 @@
 //! Packages the canonical Kurogane bundle as an NSIS installer.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -226,7 +226,8 @@ fn generate_installer_nsi(
         .replace("{{desktop_shortcut}}", desktop_shortcut);
 
     let nsi_path = output_dir.join("installer.nsi");
-    fs::write(&nsi_path, &nsi_content)?;
+    fs::write(&nsi_path, &nsi_content)
+        .with_context(|| format!("failed to write {}", nsi_path.display()))?;
     Ok(nsi_path)
 }
 
@@ -288,7 +289,10 @@ fn target_arch() -> &'static str {
 fn dir_size(path: &Path) -> Result<u64> {
     let mut total = 0;
     if path.is_dir() {
-        for entry in fs::read_dir(path)? {
+        let entries = fs::read_dir(path)
+            .with_context(|| format!("failed to read directory {}", path.display()))?;
+
+        for entry in entries {
             let entry = entry?;
             let metadata = entry.metadata()?;
             if metadata.is_dir() {
@@ -311,9 +315,11 @@ pub fn build(
     let makensis = find_makensis()?;
 
     if output_dir.exists() {
-        fs::remove_dir_all(output_dir)?;
+        fs::remove_dir_all(&output_dir)
+            .with_context(|| format!("failed to remove directory {}", output_dir.display()))?;
     }
-    fs::create_dir_all(output_dir)?;
+    fs::create_dir_all(&output_dir)
+        .with_context(|| format!("failed to create directory {}", output_dir.display()))?;
 
     let name = &dist.metadata.name;
     let version = &dist.metadata.version;
@@ -360,7 +366,8 @@ pub fn build(
     }
 
     // Cleanup staging
-    fs::remove_dir_all(&bundle_dir)?;
+    fs::remove_dir_all(&bundle_dir)
+        .with_context(|| format!("failed to remove directory {}", bundle_dir.display()))?;
 
     // Sign and verify the resulting artifact
     if let Some(sign_config) = sign {

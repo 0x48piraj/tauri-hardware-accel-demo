@@ -199,10 +199,14 @@ pub fn regenerate_project(
 /// Empty a project directory, preserving the build directory, create if it's missing.
 fn reset_project_dir(project_dir: &Path) -> Result<()> {
     if !project_dir.exists() {
-        return Ok(fs::create_dir_all(project_dir)?);
+        return fs::create_dir_all(project_dir)
+            .with_context(|| format!("failed to create directory {}", project_dir.display()));
     }
 
-    for entry in fs::read_dir(project_dir)? {
+    let entries = fs::read_dir(project_dir)
+        .with_context(|| format!("failed to read directory {}", project_dir.display()))?;
+
+    for entry in entries {
         let entry = entry?;
 
         if entry.file_name() == "target" {
@@ -212,9 +216,11 @@ fn reset_project_dir(project_dir: &Path) -> Result<()> {
         let path = entry.path();
 
         if entry.file_type()?.is_dir() {
-            fs::remove_dir_all(&path)?;
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("failed to remove directory {}", path.display()))?;
         } else {
-            fs::remove_file(&path)?;
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
         }
     }
 
@@ -249,7 +255,9 @@ pub fn generate_into_existing_dir(
 
 /// Keep the bundled CEF runtime discoverable without environment shims.
 pub(crate) fn write_cargo_config(project_dir: &Path) -> Result<()> {
-    fs::create_dir_all(project_dir.join(".cargo"))?;
+    let cargo_dir = project_dir.join(".cargo");
+    fs::create_dir_all(&cargo_dir)
+        .with_context(|| format!("failed to create directory {}", cargo_dir.display()))?;
 
     fs::write(
         project_dir.join(".cargo/config.toml"),

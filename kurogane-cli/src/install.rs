@@ -3,7 +3,7 @@
 //! This module downloads the configured CEF distribution, records its
 //! provenance and installs it into Kurogane's managed runtime cache.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use download_cef::{CefIndex, DEFAULT_TARGET};
 use kurogane_layout::{install_root, validate_cef_runtime};
 use std::time::Duration;
@@ -27,7 +27,9 @@ pub fn run() -> Result<()> {
             Err(err) => {
                 tui::warn("Existing Chromium runtime is incomplete; reinstalling");
                 tui::field("reason", err);
-                std::fs::remove_dir_all(&install_dir)?;
+                std::fs::remove_dir_all(&install_dir).with_context(|| {
+                    format!("failed to remove directory {}", install_dir.display())
+                })?;
             }
         }
     }
@@ -38,7 +40,8 @@ pub fn run() -> Result<()> {
     let parent = install_dir
         .parent()
         .ok_or_else(|| anyhow::anyhow!("install path has no parent: {}", install_dir.display()))?;
-    std::fs::create_dir_all(parent)?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create directory {}", parent.display()))?;
 
     let index = CefIndex::download()?;
     let platform = index.platform(DEFAULT_TARGET)?;
@@ -58,7 +61,8 @@ pub fn run() -> Result<()> {
     tui::step("Installing...");
     tui::field("path", tui::format_path(&install_dir));
 
-    std::fs::rename(&extracted, &install_dir)?;
+    std::fs::rename(&extracted, &install_dir)
+        .with_context(|| format!("failed to rename {}", extracted.display()))?;
 
     if let Err(err) = std::fs::remove_file(&archive)
         && err.kind() != std::io::ErrorKind::NotFound
