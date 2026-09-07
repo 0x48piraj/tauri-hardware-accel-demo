@@ -30,6 +30,32 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # Verify the declared MSRV against CEF-free crates
+  msrv:
+    name: msrv (1.96)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo fetch --locked
+      - run: cargo check -p kurogane-layout -p kurogane-cli --all-targets --locked
+
+  # Check advisories, licenses, bans and dependency sources
+  # Note: the cef-rs git dependency is outside advisory coverage; see deny.toml
+  audit:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   # Fast cross-platform checks without CEF
   check:
     name: check (${{ matrix.os }})
@@ -131,5 +157,4 @@ jobs:
         run: cargo build -p kurogane-tests --examples --locked
 
       - name: Clippy
-        continue-on-error: true
         run: cargo clippy -p kurogane --all-targets --locked -- -D warnings
