@@ -315,10 +315,10 @@ pub fn build(
     let makensis = find_makensis()?;
 
     if output_dir.exists() {
-        fs::remove_dir_all(&output_dir)
+        fs::remove_dir_all(output_dir)
             .with_context(|| format!("failed to remove directory {}", output_dir.display()))?;
     }
-    fs::create_dir_all(&output_dir)
+    fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create directory {}", output_dir.display()))?;
 
     let name = &dist.metadata.name;

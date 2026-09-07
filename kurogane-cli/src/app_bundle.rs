@@ -194,7 +194,7 @@ fn install_helpers(
 
         let helper_exe = macos.join(&helper_name);
 
-        fs::copy(&executable, &helper_exe).with_context(|| {
+        fs::copy(executable, &helper_exe).with_context(|| {
             format!(
                 "failed to copy {} to {}",
                 executable.display(),
@@ -360,7 +360,7 @@ pub fn build(
             copy_dir(&resource.source, &dest)?;
         } else {
             if let Some(parent) = dest.parent() {
-                fs::create_dir_all(&parent)
+                fs::create_dir_all(parent)
                     .with_context(|| format!("failed to create directory {}", parent.display()))?;
             }
             fs::copy(&resource.source, &dest).with_context(|| {

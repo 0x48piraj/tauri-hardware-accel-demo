@@ -1,21 +1,21 @@
-pub mod envelope;
-pub mod transport {
-    pub mod message;
+pub(crate) mod envelope;
+pub(crate) mod transport {
+    pub(crate) mod message;
 }
-pub mod browser_state;
-pub mod renderer_state;
-pub mod pending;
-pub mod rpc;
-pub mod binary_buffer;
-pub mod utils;
-pub mod responder;
-pub mod event;
-pub mod stream;
-pub mod request_response;
-pub mod router;
-pub mod browser;
-pub mod renderer;
-pub mod handle_cell;
+pub(crate) mod browser_state;
+pub(crate) mod renderer_state;
+pub(crate) mod pending;
+pub(crate) mod rpc;
+pub(crate) mod binary_buffer;
+pub(crate) mod utils;
+pub(crate) mod responder;
+pub(crate) mod event;
+pub(crate) mod stream;
+pub(crate) mod request_response;
+pub(crate) mod router;
+pub(crate) mod browser;
+pub(crate) mod renderer;
+pub(crate) mod handle_cell;
 
 // Public exports for the rest of the application
 pub use browser::handle_ipc_message;
