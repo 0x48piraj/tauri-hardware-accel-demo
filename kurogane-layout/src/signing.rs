@@ -138,6 +138,7 @@ fn resolve_password(
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SigningError {
     #[error("no signing tool found; install signtool.exe (Windows SDK) or osslsigncode")]
     NoSigningTool,

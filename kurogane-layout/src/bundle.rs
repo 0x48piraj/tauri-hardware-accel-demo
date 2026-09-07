@@ -25,6 +25,7 @@ use crate::{ResolvedDistribution, layout::copy_dir};
 
 /// Errors raised while materializing or verifying a canonical bundle.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum BundleError {
     #[error("frontend directory missing: {0}")]
     MissingFrontend(PathBuf),

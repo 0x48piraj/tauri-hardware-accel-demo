@@ -2,6 +2,7 @@ use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum RuntimeError {
     InvalidAssetRoot(PathBuf),
     InvalidFrontendUrl(String),
@@ -139,11 +140,20 @@ impl Display for RuntimeError {
 }
 
 impl std::error::Error for RuntimeError {
+    /// Returns the underlying error that caused this runtime error, when available.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             RuntimeError::AssetRootUnavailable { source, .. }
             | RuntimeError::CacheUnavailable { source, .. } => Some(source),
-            _ => None,
+
+            RuntimeError::InvalidAssetRoot(_)
+            | RuntimeError::InvalidFrontendUrl(_)
+            | RuntimeError::AssetRootMissing(_)
+            | RuntimeError::CefInitializeFailed
+            | RuntimeError::CefNotInstalled
+            | RuntimeError::InvalidCefInstallation(_)
+            | RuntimeError::BrowserCreationFailed
+            | RuntimeError::WindowCreationFailed => None,
         }
     }
 }

@@ -44,6 +44,7 @@ pub struct ResolvedDistribution {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum DistributionError {
     #[error("executable not found: {0}")]
     MissingExecutable(PathBuf),

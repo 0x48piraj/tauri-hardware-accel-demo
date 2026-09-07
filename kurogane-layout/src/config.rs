@@ -12,6 +12,7 @@ use crate::{AppMetadata, ResolvedResource};
 pub const CONFIG_FILE_NAME: &str = "kurogane.toml";
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("failed to read {}", .0.display())]
     Io(PathBuf, #[source] std::io::Error),

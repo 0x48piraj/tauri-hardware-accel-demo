@@ -36,6 +36,7 @@ pub struct DetectedCef {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum DetectError {
     #[error("CEF runtime not found")]
     NotFound,

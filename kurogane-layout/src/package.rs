@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::{BundleLayout, ResolvedDistribution};
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PackageError {
     #[error(transparent)]
     Layout(#[from] crate::BundleError),

@@ -125,7 +125,7 @@ fn bundled_resource_root_for(exe: &Path) -> Option<PathBuf> {
 pub fn bundled_helper_path() -> Result<Option<PathBuf>, std::io::Error> {
     #[cfg(target_os = "macos")]
     {
-        return Ok(bundled_helper_path_for(&std::env::current_exe()?));
+        Ok(bundled_helper_path_for(&std::env::current_exe()?))
     }
 
     #[cfg(not(target_os = "macos"))]
