@@ -200,7 +200,17 @@ wrap_resource_handler! {
             let offset = self.offset.load(Ordering::Acquire);
             let data = self.data.as_ref();
 
-            debug_assert!(offset <= data.len(), "offset invariant broken");
+            // Runs inside a CEF FFI callback, where a slice panic could abort the process
+            // Refuse the read rather than panic
+            if offset > data.len() {
+                debug!(
+                    "[app://] read: refused (offset {offset} past {} bytes)",
+                    data.len()
+                );
+
+                *br = 0;
+                return 0;
+            }
 
             let remaining = &data[offset..];
             let read = remaining.len().min(bytes_to_read as usize);

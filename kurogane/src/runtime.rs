@@ -542,8 +542,10 @@ pub struct BrowserHandle {
 }
 
 impl BrowserHandle {
+    /// Ensures CEF UI-thread affinity for this handle.
+    #[track_caller]
     fn assert_ui_thread(&self) {
-        debug_assert_eq!(
+        assert_eq!(
             std::thread::current().id(),
             self.ui_thread_id,
             "BrowserHandle methods must be called from the UI thread where the runtime was initialized"
