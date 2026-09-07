@@ -102,7 +102,11 @@ impl EventSubsystem {
             payload_kind: PAYLOAD_JSON,
         };
 
-        let payload = encode_cmd_payload(cmd, data);
+        let Some(payload) = encode_cmd_payload(cmd, data) else {
+            debug!("[Event Browser] event name exceeds the protocol length limit");
+            return;
+        };
+
         let Some(mut msg) = build_message("kurogane_event", &envelope, &payload) else {
             debug!("[Event Browser] failed to build broadcast message");
             return;

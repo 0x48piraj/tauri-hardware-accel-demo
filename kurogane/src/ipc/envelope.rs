@@ -92,16 +92,29 @@ pub fn parse_envelope(data: &[u8]) -> Option<(Envelope, &[u8])> {
     Some((envelope, &data[ENVELOPE_SIZE..]))
 }
 
+/// Longest command name the wire format can express.
+pub const MAX_CMD_LEN: usize = u16::MAX as usize;
+
 /// Encodes a command payload.
 ///
 /// Wire format: [command_len: u16 LE][command UTF-8][data]
-pub fn encode_cmd_payload(cmd: &str, data: &[u8]) -> Vec<u8> {
+///
+/// Returns None when the command exceeds [`MAX_CMD_LEN`]. Truncating the
+/// prefix with an `as` cast instead would wrap the length silently and make
+/// the receiver read the command bytes as payload.
+pub fn encode_cmd_payload(cmd: &str, data: &[u8]) -> Option<Vec<u8>> {
     let cmd_bytes = cmd.as_bytes();
+    if cmd_bytes.len() > MAX_CMD_LEN {
+        return None;
+    }
+
     let mut buf = Vec::with_capacity(2 + cmd_bytes.len() + data.len());
-    buf.extend_from_slice(&(cmd_bytes.len() as u16).to_le_bytes());
+    // Narrowing is safe: bounded by MAX_CMD_LEN on the line above.
+    let cmd_len = cmd_bytes.len() as u16;
+    buf.extend_from_slice(&cmd_len.to_le_bytes());
     buf.extend_from_slice(cmd_bytes);
     buf.extend_from_slice(data);
-    buf
+    Some(buf)
 }
 
 /// Decodes a command payload.
@@ -324,7 +337,7 @@ mod tests {
     fn cmd_payload_roundtrip_basic() {
         let cmd = "hello";
         let data = b"world";
-        let buf = encode_cmd_payload(cmd, data);
+        let buf = encode_cmd_payload(cmd, data).expect("test command fits in u16");
         let (decoded_cmd, decoded_data) = decode_cmd_payload(&buf).expect("decode must succeed");
         assert_eq!(decoded_cmd, cmd);
         assert_eq!(decoded_data, data);
@@ -334,7 +347,7 @@ mod tests {
     fn cmd_payload_roundtrip_empty_command() {
         let cmd = "";
         let data = b"some data";
-        let buf = encode_cmd_payload(cmd, data);
+        let buf = encode_cmd_payload(cmd, data).expect("test command fits in u16");
         let (decoded_cmd, decoded_data) = decode_cmd_payload(&buf).unwrap();
         assert_eq!(decoded_cmd, "");
         assert_eq!(decoded_data, data);
@@ -344,7 +357,7 @@ mod tests {
     fn cmd_payload_roundtrip_empty_data() {
         let cmd = "my_command";
         let data = b"";
-        let buf = encode_cmd_payload(cmd, data);
+        let buf = encode_cmd_payload(cmd, data).expect("test command fits in u16");
         let (decoded_cmd, decoded_data) = decode_cmd_payload(&buf).unwrap();
         assert_eq!(decoded_cmd, cmd);
         assert!(decoded_data.is_empty());
@@ -352,7 +365,7 @@ mod tests {
 
     #[test]
     fn cmd_payload_roundtrip_both_empty() {
-        let buf = encode_cmd_payload("", b"");
+        let buf = encode_cmd_payload("", b"").expect("test command fits in u16");
         let (decoded_cmd, decoded_data) = decode_cmd_payload(&buf).unwrap();
         assert_eq!(decoded_cmd, "");
         assert!(decoded_data.is_empty());
@@ -363,7 +376,7 @@ mod tests {
     fn cmd_payload_roundtrip_long_command() {
         let cmd = "a".repeat(1000);
         let data = b"payload";
-        let buf = encode_cmd_payload(&cmd, data);
+        let buf = encode_cmd_payload(&cmd, data).expect("test command fits in u16");
         let (decoded_cmd, decoded_data) = decode_cmd_payload(&buf).unwrap();
         assert_eq!(decoded_cmd, cmd.as_str());
         assert_eq!(decoded_data, data);
@@ -373,7 +386,7 @@ mod tests {
     fn cmd_payload_roundtrip_binary_data() {
         let cmd = "bin";
         let data: Vec<u8> = (0..=255).collect();
-        let buf = encode_cmd_payload(cmd, &data);
+        let buf = encode_cmd_payload(cmd, &data).expect("test command fits in u16");
         let (decoded_cmd, decoded_data) = decode_cmd_payload(&buf).unwrap();
         assert_eq!(decoded_cmd, cmd);
         assert_eq!(decoded_data, &data[..]);
@@ -383,7 +396,7 @@ mod tests {
     #[test]
     fn cmd_payload_wire_format_header_is_u16_le() {
         let cmd = "AB"; // 2 bytes
-        let buf = encode_cmd_payload(cmd, b"");
+        let buf = encode_cmd_payload(cmd, b"").expect("test command fits in u16");
         assert_eq!(buf[0], 2, "low byte of command length");
         assert_eq!(buf[1], 0, "high byte of command length");
     }
@@ -393,7 +406,7 @@ mod tests {
     fn cmd_payload_wire_format_concatenation() {
         let cmd = "X";
         let data = b"YZ";
-        let buf = encode_cmd_payload(cmd, data);
+        let buf = encode_cmd_payload(cmd, data).expect("test command fits in u16");
         assert_eq!(&buf[0..2], &[1, 0]); // cmd_len = 1
         assert_eq!(buf[2], b'X'); // cmd byte
         assert_eq!(&buf[3..], b"YZ"); // data bytes
@@ -446,7 +459,7 @@ mod tests {
     #[test]
     fn decode_cmd_payload_valid_utf8_multibyte() {
         let cmd = "日本語"; // 3-byte UTF-8 chars
-        let buf = encode_cmd_payload(cmd, b"");
+        let buf = encode_cmd_payload(cmd, b"").expect("test command fits in u16");
         let (decoded, rest) = decode_cmd_payload(&buf).unwrap();
         assert_eq!(decoded, cmd);
         assert!(rest.is_empty());
@@ -454,7 +467,7 @@ mod tests {
 
     #[test]
     fn decode_cmd_payload_with_trailing_data() {
-        let buf = encode_cmd_payload("cmd", b"trailing");
+        let buf = encode_cmd_payload("cmd", b"trailing").expect("test command fits in u16");
         let (cmd, rest) = decode_cmd_payload(&buf).unwrap();
         assert_eq!(cmd, "cmd");
         assert_eq!(rest, b"trailing");
@@ -555,7 +568,7 @@ mod tests {
     // Both empty: header is [0x00, 0x00]; no command or data bytes
     #[test]
     fn cmd_payload_empty_command_and_data() {
-        let buf = encode_cmd_payload("", b"");
+        let buf = encode_cmd_payload("", b"").expect("test command fits in u16");
         assert_eq!(buf.len(), 2);
         assert_eq!(buf[0], 0x00);
         assert_eq!(buf[1], 0x00);
@@ -567,19 +580,31 @@ mod tests {
     // Verifies round-trip encoding for a command at the u16 length limit
     #[test]
     fn cmd_payload_max_command_length() {
-        let cmd = "x".repeat(65535);
-        let buf = encode_cmd_payload(&cmd, b"");
+        let cmd = "x".repeat(MAX_CMD_LEN);
+        let buf = encode_cmd_payload(&cmd, b"").expect("test command fits in u16");
         let (decoded_cmd, rest) = decode_cmd_payload(&buf).unwrap();
-        assert_eq!(decoded_cmd.len(), 65535);
+        assert_eq!(decoded_cmd.len(), MAX_CMD_LEN);
         assert_eq!(decoded_cmd, cmd.as_str());
         assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn cmd_payload_rejects_command_past_the_limit() {
+        let cmd = "x".repeat(MAX_CMD_LEN + 1);
+        assert!(encode_cmd_payload(&cmd, b"").is_none());
+    }
+
+    #[test]
+    fn cmd_payload_rejects_oversized_command_regardless_of_payload() {
+        let cmd = "x".repeat(MAX_CMD_LEN + 1);
+        assert!(encode_cmd_payload(&cmd, b"trailing data").is_none());
     }
 
     // Large data payload with small command
     #[test]
     fn cmd_payload_large_data() {
         let data = vec![0xAB; 50_000];
-        let buf = encode_cmd_payload("go", &data);
+        let buf = encode_cmd_payload("go", &data).expect("test command fits in u16");
         let (cmd, rest) = decode_cmd_payload(&buf).unwrap();
         assert_eq!(cmd, "go");
         assert_eq!(rest.len(), 50_000);
@@ -590,7 +615,7 @@ mod tests {
     #[test]
     fn cmd_payload_binary_data_preserves_all_bytes() {
         let data: Vec<u8> = (0..=255).collect();
-        let buf = encode_cmd_payload("bin", &data);
+        let buf = encode_cmd_payload("bin", &data).expect("test command fits in u16");
         let (_, rest) = decode_cmd_payload(&buf).unwrap();
         assert_eq!(rest, &data[..]);
     }
@@ -607,7 +632,7 @@ mod tests {
     // Verifies decoding preserves payload data when the command is empty
     #[test]
     fn decode_cmd_payload_length_header_zero_with_data() {
-        let buf = encode_cmd_payload("", b"trailing");
+        let buf = encode_cmd_payload("", b"trailing").expect("test command fits in u16");
         let (cmd, rest) = decode_cmd_payload(&buf).unwrap();
         assert_eq!(cmd, "");
         assert_eq!(rest, b"trailing");
@@ -672,7 +697,7 @@ mod property_tests {
             cmd in "[a-zA-Z0-9_]{0,1000}",
             data in prop::collection::vec(0u8..=0xFF, 0..10_000),
         ) {
-            let buf = encode_cmd_payload(&cmd, &data);
+            let buf = encode_cmd_payload(&cmd, &data).expect("test command fits in u16");
             let (decoded_cmd, decoded_data) = decode_cmd_payload(&buf)
                 .expect("decode must succeed for valid encode output");
             prop_assert_eq!(decoded_cmd, cmd.as_str());
@@ -684,7 +709,7 @@ mod property_tests {
         fn prop_cmd_payload_length_header_matches_command(
             cmd in "[a-z]{1,500}",
         ) {
-            let buf = encode_cmd_payload(&cmd, b"");
+            let buf = encode_cmd_payload(&cmd, b"").expect("test command fits in u16");
             let header = u16::from_le_bytes([buf[0], buf[1]]);
             prop_assert_eq!(header as usize, cmd.len());
         }

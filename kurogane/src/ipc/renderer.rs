@@ -54,12 +54,21 @@ fn with_array_buffer<R>(ptr: *const u8, len: usize, f: impl FnOnce(&[u8]) -> R) 
 }
 
 /// Encode [cmd_len:u16 LE][cmd_bytes] into a Vec.
-fn encode_cmd_header(cmd: &str) -> Vec<u8> {
+///
+/// Returns None when the command exceeds [`MAX_CMD_LEN`]; see
+/// [`encode_cmd_payload`] for why this is not an `as` cast.
+fn encode_cmd_header(cmd: &str) -> Option<Vec<u8>> {
     let cmd_bytes = cmd.as_bytes();
+    if cmd_bytes.len() > MAX_CMD_LEN {
+        return None;
+    }
+
     let mut v = Vec::with_capacity(2 + cmd_bytes.len());
-    v.extend_from_slice(&(cmd_bytes.len() as u16).to_le_bytes());
+    // Narrowing is safe; bounded by MAX_CMD_LEN on the line above
+    let cmd_len = cmd_bytes.len() as u16;
+    v.extend_from_slice(&cmd_len.to_le_bytes());
     v.extend_from_slice(cmd_bytes);
-    v
+    Some(v)
 }
 
 //
@@ -469,7 +478,15 @@ wrap_v8_handler! {
                 .and_then(|v| v.as_ref())
                 .is_some_and(|v| v.is_array_buffer() != 0);
 
-            let cmd_header = encode_cmd_header(&cmd);
+            let Some(cmd_header) = encode_cmd_header(&cmd) else {
+                if let Some(exc) = exception {
+                    *exc = CefString::from(
+                        "invoke: command name exceeds the 65535-byte protocol limit",
+                    );
+                }
+                return 0;
+            };
+
             let promise = v8_value_create_promise().unwrap();
             let promise_for_retval = promise.clone();
             let id = register_promise(context.clone(), promise.clone(), SUB_RPC);
@@ -716,8 +733,17 @@ wrap_v8_handler! {
                 callback.clone(),
             );
 
+            let Some(payload) = encode_cmd_payload(&event_name, &[]) else {
+                if let Some(exc) = exception {
+                    *exc = CefString::from(
+                        "on: event name exceeds the 65535-byte protocol limit",
+                    );
+                }
+                renderer_state().lock().unwrap().events.unregister(id);
+                return 0;
+            };
+
             let subscribe = {
-                let payload = encode_cmd_payload(&event_name, &[]);
                 let envelope = Envelope {
                     version: ENVELOPE_VERSION,
                     subsystem: SUB_EVENT,
@@ -796,8 +822,8 @@ wrap_v8_handler! {
 
             if let Some(event_name) = event_name
                 && let Some(frame) = context.frame()
+                && let Some(payload) = encode_cmd_payload(&event_name, &[])
             {
-                let payload = encode_cmd_payload(&event_name, &[]);
                 let envelope = Envelope {
                     version: ENVELOPE_VERSION,
                     subsystem: SUB_EVENT,
@@ -888,8 +914,9 @@ wrap_v8_handler! {
                 payload_kind: PAYLOAD_STRING,
             };
 
-            let payload = encode_cmd_payload(&handler_name, metadata.as_bytes());
-            if let Some(mut msg) = build_message("kurogane_stream", &envelope, &payload) {
+            if let Some(payload) = encode_cmd_payload(&handler_name, metadata.as_bytes())
+                && let Some(mut msg) = build_message("kurogane_stream", &envelope, &payload)
+            {
                 frame.send_process_message(ProcessId::BROWSER, Some(&mut msg));
             }
 
